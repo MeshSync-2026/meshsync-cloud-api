@@ -209,3 +209,5 @@ CREATE TABLE IF NOT EXISTS satellite_uplink (
 
 
 COMMIT;
+
+-- NOTE Handle in application logic: creator_node_id is nullable to allow placeholder incident creation if child events arrive out of order; the fold engine will update it when SOS_CREATED arrives.
