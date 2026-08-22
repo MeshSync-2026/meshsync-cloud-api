@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS mesh_event (
     longitude       double precision,
     landmark_name   text,                      -- nullable, hard cap 30 chars
     report_type_code integer,                  -- 1=SOS 2=HAZARD 3=STATUS
-    category_code   integer,                   -- nullable 1=Flood 2=Landslide 3=Fire 4=Structural
+    category_code   integer,                       -- nullable 1=Flood 2=Landslide 3=Fire 4=Structural
     severity_level  integer,                   -- 1=Low 2=Medium 3=High
     status_safety   integer,                   -- 0=Safe 1=NeedHelp 2=Trapped
     people_count    integer,
