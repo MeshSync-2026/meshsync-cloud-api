@@ -7,7 +7,7 @@
 //   4. LWW fold  apply events in HLC order to build projections
 //   5. Confidence derivation  compare last_alive_hlc to current device HLC
 
-// Determinism: every replica with the same MESH_EVENT set produces the same projection through this pipeline.
+// Determinism:every replica with the same MESH_EVENT set produces the same projection through this pipeline.
 
 import {
   EVENT_TYPE,
