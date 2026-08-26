@@ -1,0 +1,17 @@
+{
+  "name": "@meshsync/shared",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./hlc": "./src/hlc.js",
+    "./enums": "./src/enums.js",
+    "./fold": "./src/fold.js",
+    "./priority": "./src/priority.js",
+    "./validation": "./src/validation.js"
+  },
+  "scripts": {
+    "test": "node --test src/*.test.js"
+  }
+}
