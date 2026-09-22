@@ -34,12 +34,49 @@
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { CommandCenterDb } from "./db.js";
+import pg from "pg";
+import { createDb, InMemoryDb, PostgresDb } from "./db.js";
 import { CLEARANCE } from "@meshsync/shared/enums";
 
-export function createServer(edgeSyncClient = null) {
-  const db = new CommandCenterDb();
-  db.edgeSyncClient = edgeSyncClient;
+function createHttpEdgeSyncClient(edgeSyncUrl, internalToken) {
+  return {
+    async emitAssign(payload) {
+      const res = await fetch(`${edgeSyncUrl}/internal/assign`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-internal-token": internalToken || "",
+        },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`Edge Sync assign error (${res.status}): ${errText}`);
+      }
+      return await res.json();
+    },
+    async getIncidents() {
+      const res = await fetch(`${edgeSyncUrl}/incidents`);
+      if (!res.ok) return [];
+      const data = await res.json();
+      return data.incidents || [];
+    },
+  };
+}
+
+export function createServer(edgeSyncClient = null, db = null) {
+  let database = db;
+  if (!database) {
+    if (process.env.DATABASE_URL) {
+      const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+      database = createDb(true, pool);
+    } else {
+      database = createDb(false);
+    }
+  }
+
+  const client = edgeSyncClient || (process.env.EDGE_SYNC_URL ? createHttpEdgeSyncClient(process.env.EDGE_SYNC_URL, process.env.INTERNAL_API_SECRET) : null);
+  database.edgeSyncClient = client;
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -77,10 +114,15 @@ export function createServer(edgeSyncClient = null) {
           res.end(JSON.stringify({ error: "Invalid JSON" }));
           return;
         }
-        const result = await db.authenticate(body.username, body.password);
+        const result = await database.authenticate(body.username, body.password);
         if (!result) {
           res.writeHead(401);
           res.end(JSON.stringify({ error: "Invalid credentials" }));
+          return;
+        }
+        if (result.error === "pending") {
+          res.writeHead(403);
+          res.end(JSON.stringify({ error: result.message || "Account is pending commander approval" }));
           return;
         }
         res.writeHead(200);
@@ -104,17 +146,18 @@ export function createServer(edgeSyncClient = null) {
           return;
         }
         // Check for existing user
-        const existing = (await db.getUsers()).find((u) => u.username === body.username);
+        const existing = (await database.getUsers()).find((u) => u.username === body.username);
         if (existing) {
           res.writeHead(409);
           res.end(JSON.stringify({ error: "User already exists" }));
           return;
         }
-        const user = await db.createUser({
+        const user = await database.createUser({
           username: body.username,
           password: body.password,
           full_name: body.full_name,
           clearance_level: CLEARANCE.DISPATCHER,
+          is_active: false,
         });
         const { password_hash, ...safeUser } = user;
         res.writeHead(201);
@@ -125,7 +168,7 @@ export function createServer(edgeSyncClient = null) {
       if (path === "/auth/me" && method === "GET") {
         const authHeader = req.headers.authorization;
         const token = authHeader?.startsWith("Bearer ") ? authHeader.substring(7) : null;
-        const user = token ? await db.getUserByToken(token) : null;
+        const user = token ? await database.getUserByToken(token) : null;
         if (!user) {
           res.writeHead(401);
           res.end(JSON.stringify({ error: "Not authenticated" }));
@@ -139,11 +182,10 @@ export function createServer(edgeSyncClient = null) {
       // Auth middleware for remaining endpoints
       const authHeader = req.headers.authorization;
       const token = authHeader?.startsWith("Bearer ") ? authHeader.substring(7) : null;
-      const currentUser = token ? await db.getUserByToken(token) : null;
+      const currentUser = token ? await database.getUserByToken(token) : null;
 
-      // In production, require valid authentication for all protected routes
-      const isPublicRoute = path.startsWith("/health") || path === "/auth/login" || path === "/auth/signup";
-      if (process.env.NODE_ENV === "production" && !currentUser && !isPublicRoute) {
+      const isPublicRoute = path === "/health" || path === "/auth/login" || path === "/auth/signup";
+      if (!isPublicRoute && !currentUser) {
         res.writeHead(401);
         res.end(JSON.stringify({ error: "Authentication required. Please provide a valid Bearer token." }));
         return;
@@ -165,24 +207,16 @@ export function createServer(edgeSyncClient = null) {
 
       // --- Users (COMMANDER only) ---
       if (path === "/users" && method === "GET") {
-        if (currentUser && currentUser.clearance_level !== CLEARANCE.COMMANDER) {
-          res.writeHead(403);
-          res.end(JSON.stringify({ error: "Forbidden: Commander clearance required" }));
-          return;
-        }
+        if (!requireCommander()) return;
         res.writeHead(200);
-        res.end(JSON.stringify({ users: await db.getUsers() }));
+        res.end(JSON.stringify({ users: await database.getUsers() }));
         return;
       }
 
       const approveMatch = path.match(/^\/users\/([^/]+)\/approve$/);
       if (approveMatch && method === "POST") {
-        if (currentUser && currentUser.clearance_level !== CLEARANCE.COMMANDER) {
-          res.writeHead(403);
-          res.end(JSON.stringify({ error: "Forbidden: Commander clearance required" }));
-          return;
-        }
-        const updated = await db.updateUser(approveMatch[1], { is_active: true, clearance_level: CLEARANCE.DISPATCHER });
+        if (!requireCommander()) return;
+        const updated = await database.updateUser(approveMatch[1], { is_active: true, clearance_level: CLEARANCE.DISPATCHER });
         res.writeHead(200);
         res.end(JSON.stringify(updated));
         return;
@@ -190,12 +224,8 @@ export function createServer(edgeSyncClient = null) {
 
       const rejectMatch = path.match(/^\/users\/([^/]+)\/reject$/);
       if (rejectMatch && method === "POST") {
-        if (currentUser && currentUser.clearance_level !== CLEARANCE.COMMANDER) {
-          res.writeHead(403);
-          res.end(JSON.stringify({ error: "Forbidden: Commander clearance required" }));
-          return;
-        }
-        const updated = await db.updateUser(rejectMatch[1], { is_active: false });
+        if (!requireCommander()) return;
+        const updated = await database.updateUser(rejectMatch[1], { is_active: false });
         res.writeHead(200);
         res.end(JSON.stringify(updated));
         return;
@@ -204,7 +234,7 @@ export function createServer(edgeSyncClient = null) {
       // --- Devices ---
       if (path === "/devices" && method === "GET") {
         res.writeHead(200);
-        res.end(JSON.stringify({ devices: await db.getDevices() }));
+        res.end(JSON.stringify({ devices: await database.getDevices() }));
         return;
       }
 
@@ -215,7 +245,7 @@ export function createServer(edgeSyncClient = null) {
           res.end(JSON.stringify({ error: "node_id and authority_user_id are required" }));
           return;
         }
-        const device = await db.registerDevice(body);
+        const device = await database.registerDevice(body);
         res.writeHead(201);
         res.end(JSON.stringify(device));
         return;
@@ -224,12 +254,8 @@ export function createServer(edgeSyncClient = null) {
       // Device revocation (COMMANDER clearance required)
       const revokeDeviceMatch = path.match(/^\/devices\/([^/]+)\/revoke$/);
       if (revokeDeviceMatch && method === "POST") {
-        if (currentUser && currentUser.clearance_level !== CLEARANCE.COMMANDER) {
-          res.writeHead(403);
-          res.end(JSON.stringify({ error: "Forbidden: Commander clearance required to revoke devices" }));
-          return;
-        }
-        const device = await db.revokeDevice(revokeDeviceMatch[1]);
+        if (!requireCommander()) return;
+        const device = await database.revokeDevice(revokeDeviceMatch[1]);
         if (!device) {
           res.writeHead(404);
           res.end(JSON.stringify({ error: "Device not found" }));
@@ -243,7 +269,7 @@ export function createServer(edgeSyncClient = null) {
       // --- Zones ---
       if (path === "/zones" && method === "GET") {
         res.writeHead(200);
-        res.end(JSON.stringify({ zones: await db.getZones() }));
+        res.end(JSON.stringify({ zones: await database.getZones() }));
         return;
       }
 
@@ -254,7 +280,7 @@ export function createServer(edgeSyncClient = null) {
           res.end(JSON.stringify({ error: "area_name is required" }));
           return;
         }
-        const zone = await db.createZone(body);
+        const zone = await database.createZone(body);
         res.writeHead(201);
         res.end(JSON.stringify(zone));
         return;
@@ -263,7 +289,7 @@ export function createServer(edgeSyncClient = null) {
       const zoneMatch = path.match(/^\/zones\/([^/]+)$/);
       if (zoneMatch && method === "PUT") {
         const body = JSON.parse(await readBody(req));
-        const zone = await db.updateZone(zoneMatch[1], body);
+        const zone = await database.updateZone(zoneMatch[1], body);
         if (!zone) {
           res.writeHead(404);
           res.end(JSON.stringify({ error: "Zone not found" }));
@@ -275,7 +301,8 @@ export function createServer(edgeSyncClient = null) {
       }
 
       if (zoneMatch && method === "DELETE") {
-        await db.deleteZone(zoneMatch[1]);
+        if (!requireCommander()) return;
+        await database.deleteZone(zoneMatch[1]);
         res.writeHead(204);
         res.end();
         return;
@@ -284,16 +311,17 @@ export function createServer(edgeSyncClient = null) {
       // --- Clusters ---
       if (path === "/clusters" && method === "GET") {
         res.writeHead(200);
-        res.end(JSON.stringify({ clusters: await db.getClusters() }));
+        res.end(JSON.stringify({ clusters: await database.getClusters() }));
         return;
       }
 
       if (path === "/clusters/recalculate" && method === "POST") {
+        if (!requireCommander()) return;
         let incidents = [];
-        if (db.edgeSyncClient) {
-          incidents = await db.edgeSyncClient.getIncidents();
+        if (database.edgeSyncClient) {
+          incidents = await database.edgeSyncClient.getIncidents();
         }
-        const newClusters = await db.recalculateClusters(incidents);
+        const newClusters = await database.recalculateClusters(incidents);
         res.writeHead(200);
         res.end(JSON.stringify({ clusters: newClusters, count: newClusters.length }));
         return;
@@ -302,12 +330,8 @@ export function createServer(edgeSyncClient = null) {
       // Cluster resolution (COMMANDER clearance required)
       const resolveClusterMatch = path.match(/^\/clusters\/([^/]+)\/resolve$/);
       if (resolveClusterMatch && method === "POST") {
-        if (currentUser && currentUser.clearance_level !== CLEARANCE.COMMANDER) {
-          res.writeHead(403);
-          res.end(JSON.stringify({ error: "Forbidden: Commander clearance required to resolve clusters" }));
-          return;
-        }
-        const cluster = await db.resolveCluster(resolveClusterMatch[1], currentUser?.id);
+        if (!requireCommander()) return;
+        const cluster = await database.resolveCluster(resolveClusterMatch[1], currentUser?.id);
         if (!cluster) {
           res.writeHead(404);
           res.end(JSON.stringify({ error: "Cluster not found" }));
@@ -320,10 +344,10 @@ export function createServer(edgeSyncClient = null) {
 
       // --- Squads ---
       if (path === "/squads" && method === "GET") {
-        const rawSquads = await db.getSquads();
+        const rawSquads = await database.getSquads();
         const squads = await Promise.all(rawSquads.map(async (s) => ({
           ...s,
-          member_count: (await db.getSquadMembers(s.id)).length,
+          member_count: (await database.getSquadMembers(s.id)).length,
         })));
         res.writeHead(200);
         res.end(JSON.stringify({ squads }));
@@ -337,7 +361,7 @@ export function createServer(edgeSyncClient = null) {
           res.end(JSON.stringify({ error: "squad_name and leader_authority_user_id are required" }));
           return;
         }
-        const squad = await db.createSquad(body);
+        const squad = await database.createSquad(body);
         res.writeHead(201);
         res.end(JSON.stringify(squad));
         return;
@@ -345,13 +369,13 @@ export function createServer(edgeSyncClient = null) {
 
       const squadMatch = path.match(/^\/squads\/([^/]+)$/);
       if (squadMatch && method === "GET") {
-        const squad = await db.getSquadById(squadMatch[1]);
+        const squad = await database.getSquadById(squadMatch[1]);
         if (!squad) {
           res.writeHead(404);
           res.end(JSON.stringify({ error: "Squad not found" }));
           return;
         }
-        const members = await db.getSquadMembers(squadMatch[1]);
+        const members = await database.getSquadMembers(squadMatch[1]);
         res.writeHead(200);
         res.end(JSON.stringify({ ...squad, members }));
         return;
@@ -359,7 +383,7 @@ export function createServer(edgeSyncClient = null) {
 
       if (squadMatch && method === "PUT") {
         const body = JSON.parse(await readBody(req));
-        const squad = await db.updateSquad(squadMatch[1], body);
+        const squad = await database.updateSquad(squadMatch[1], body);
         if (!squad) {
           res.writeHead(404);
           res.end(JSON.stringify({ error: "Squad not found" }));
@@ -371,7 +395,8 @@ export function createServer(edgeSyncClient = null) {
       }
 
       if (squadMatch && method === "DELETE") {
-        await db.deleteSquad(squadMatch[1]);
+        if (!requireCommander()) return;
+        await database.deleteSquad(squadMatch[1]);
         res.writeHead(204);
         res.end();
         return;
@@ -385,7 +410,7 @@ export function createServer(edgeSyncClient = null) {
           res.end(JSON.stringify({ error: "authority_user_id is required" }));
           return;
         }
-        const member = await db.addSquadMember({
+        const member = await database.addSquadMember({
           squad_id: addMemberMatch[1],
           authority_user_id: body.authority_user_id,
           role_in_squad: body.role_in_squad,
@@ -402,7 +427,7 @@ export function createServer(edgeSyncClient = null) {
 
       const removeMemberMatch = path.match(/^\/squads\/([^/]+)\/members\/([^/]+)$/);
       if (removeMemberMatch && method === "DELETE") {
-        const member = await db.removeSquadMember(removeMemberMatch[2]);
+        const member = await database.removeSquadMember(removeMemberMatch[2]);
         if (!member) {
           res.writeHead(404);
           res.end(JSON.stringify({ error: "Member not found" }));
@@ -421,7 +446,7 @@ export function createServer(edgeSyncClient = null) {
           res.end(JSON.stringify({ error: "authority_user_id and zone_id are required" }));
           return;
         }
-        const result = await db.dispatchResponder({
+        const result = await database.dispatchResponder({
           authority_user_id: body.authority_user_id,
           zone_id: body.zone_id,
           incident_id: body.incident_id,
@@ -444,7 +469,7 @@ export function createServer(edgeSyncClient = null) {
           res.end(JSON.stringify({ error: "squad_id and zone_id are required" }));
           return;
         }
-        const result = await db.dispatchSquad({
+        const result = await database.dispatchSquad({
           squad_id: body.squad_id,
           zone_id: body.zone_id,
           admin_id: currentUser?.id,
@@ -462,14 +487,14 @@ export function createServer(edgeSyncClient = null) {
       // --- Satellite ---
       if (path === "/satellite" && method === "GET") {
         res.writeHead(200);
-        res.end(JSON.stringify({ uplinks: await db.getSatelliteUplinks() }));
+        res.end(JSON.stringify({ uplinks: await database.getSatelliteUplinks() }));
         return;
       }
 
       const satMatch = path.match(/^\/satellite\/([^/]+)$/);
       if (satMatch && method === "PUT") {
         const body = JSON.parse(await readBody(req));
-        const uplink = await db.updateSatelliteUplink(satMatch[1], body);
+        const uplink = await database.updateSatelliteUplink(satMatch[1], body);
         if (!uplink) {
           res.writeHead(404);
           res.end(JSON.stringify({ error: "Uplink not found" }));
@@ -490,7 +515,7 @@ export function createServer(edgeSyncClient = null) {
     }
   });
 
-  return { server, db };
+  return { server, db: database };
 }
 
 function readBody(req) {
