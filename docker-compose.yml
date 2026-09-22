@@ -6,16 +6,16 @@ services:
     container_name: meshsync-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: meshsync
-      POSTGRES_PASSWORD: meshsync_secure_password
-      POSTGRES_DB: meshsync
+      POSTGRES_USER: ${POSTGRES_USER:-meshsync}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-meshsync_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-meshsync}
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./migrations/001_initial_schema.sql:/docker-entrypoint-initdb.d/001_initial_schema.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U meshsync -d meshsync"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-meshsync} -d $${POSTGRES_DB:-meshsync}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -31,10 +31,10 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      NODE_ENV: production
-      EDGE_SYNC_PORT: 4001
-      INTERNAL_API_SECRET: internal-meshsync-secret-key-prod
-      DATABASE_URL: postgres://meshsync:meshsync_secure_password@postgres:5432/meshsync
+      NODE_ENV: ${NODE_ENV:-production}
+      EDGE_SYNC_PORT: ${EDGE_SYNC_PORT:-4001}
+      INTERNAL_API_SECRET: ${INTERNAL_API_SECRET:-internal-meshsync-secret-dev}
+      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-meshsync}:${POSTGRES_PASSWORD:-meshsync_dev_password}@postgres:5432/${POSTGRES_DB:-meshsync}}
     ports:
       - "4001:4001"
       - "8080:8080"
@@ -57,12 +57,12 @@ services:
       edge-sync:
         condition: service_started
     environment:
-      NODE_ENV: production
-      CC_PORT: 4002
-      SESSION_SECRET: meshsync-session-secret-key-prod-32b
-      INTERNAL_API_SECRET: internal-meshsync-secret-key-prod
-      DATABASE_URL: postgres://meshsync:meshsync_secure_password@postgres:5432/meshsync
-      EDGE_SYNC_URL: http://edge-sync:4001
+      NODE_ENV: ${NODE_ENV:-production}
+      CC_PORT: ${CC_PORT:-4002}
+      SESSION_SECRET: ${SESSION_SECRET:-meshsync-session-secret-dev-32b!}
+      INTERNAL_API_SECRET: ${INTERNAL_API_SECRET:-internal-meshsync-secret-dev}
+      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-meshsync}:${POSTGRES_PASSWORD:-meshsync_dev_password}@postgres:5432/${POSTGRES_DB:-meshsync}}
+      EDGE_SYNC_URL: ${EDGE_SYNC_URL:-http://edge-sync:4001}
     ports:
       - "4002:4002"
     healthcheck:
