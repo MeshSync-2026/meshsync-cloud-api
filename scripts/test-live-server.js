@@ -22,6 +22,8 @@ async function runLiveTest() {
   console.log("   🚀 STARTING MESHSYNC LIVE SERVER INTEGRATION TEST   ");
   console.log("=======================================================\n");
 
+  process.env.INTERNAL_API_SECRET = process.env.INTERNAL_API_SECRET || "internal-meshsync-key-secret";
+
   // 1. Start Edge Sync
   const { server: edgeServer, db: edgeDb } = createEdgeSync();
   await new Promise((res) => edgeServer.listen(EDGE_PORT, res));
@@ -177,6 +179,7 @@ async function runLiveTest() {
     console.log("=======================================================\n");
   } catch (err) {
     console.error("❌ Live Server Test Error:", err);
+    process.exitCode = 1;
   } finally {
     edgeServer.close();
     ccServer.close();
