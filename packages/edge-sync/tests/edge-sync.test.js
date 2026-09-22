@@ -1,7 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { InMemoryDb } from "../src/db.js";
-import { createServer } from "../src/server.js";
+import { createServer, getInternalApiSecret } from "../src/server.js";
 import {
     EVENT_TYPE,
     ACTOR_ROLE,
@@ -219,7 +219,10 @@ describe("Edge Sync — HTTP server", () => {
         try {
             const res = await fetch(`http://localhost:${port}/internal/assign`, {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: {
+                    "Content-Type": "application/json",
+                    "x-internal-token": getInternalApiSecret(),
+                },
                 body: JSON.stringify({
                     target_node_id: "responder-1",
                     target_zone_id: "zone-001",
