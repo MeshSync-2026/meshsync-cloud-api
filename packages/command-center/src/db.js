@@ -6,23 +6,16 @@
 //
 // Reads from: INCIDENT, MESH_EVENT, MESH_ASSIGNMENT (projections owned by Edge Sync)
 
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { CLEARANCE } from "@meshsync/shared/enums";
-
-// Simple bcrypt-like hash for demo (in production use real bcrypt)
-function hashPassword(password) {
-  return "demo$" + createHash("sha256").update(password).digest("hex");
-}
-
-function verifyPassword(password, hash) {
-  return hashPassword(password) === hash;
-}
+import { hashPassword, verifyPassword, signSessionToken, verifySessionToken } from "@meshsync/shared/auth";
+import { clusterIncidents, haversineDistance } from "./spatial.js";
 
 // ============================================================================
-// In-memory Command Center DB
+// In-memory Command Center DB (for testing & development)
 // ============================================================================
 
-export class CommandCenterDb {
+export class InMemoryDb {
   constructor() {
     this.users = new Map();           // id → user
     this.devices = new Map();         // id → device
@@ -31,14 +24,13 @@ export class CommandCenterDb {
     this.squads = new Map();          // id → squad
     this.squadMembers = new Map();    // id → member
     this.satelliteUplinks = new Map(); // id → uplink
-    this.sessions = new Map();        // token → { userId, expiresAt }
     this.edgeSyncClient = null;       // set externally to call Edge Sync
 
     this._seed();
   }
 
   _seed() {
-    // Seed demo users
+    // Seed demo users with scrypt hashes
     this.createUser({
       username: "anjali@meshsync.lk",
       password: "demo1234",
@@ -92,8 +84,11 @@ export class CommandCenterDb {
   authenticate(username, password) {
     for (const user of this.users.values()) {
       if (user.username === username && user.is_active && verifyPassword(password, user.password_hash)) {
-        const token = `token-${randomUUID()}`;
-        this.sessions.set(token, { userId: user.id, expiresAt: Date.now() + 24 * 60 * 60 * 1000 });
+        const token = signSessionToken({
+          userId: user.id,
+          username: user.username,
+          clearance: user.clearance_level,
+        });
         const { password_hash, ...safeUser } = user;
         return { token, user: safeUser };
       }
@@ -102,12 +97,10 @@ export class CommandCenterDb {
   }
 
   getUserByToken(token) {
-    const session = this.sessions.get(token);
-    if (!session || session.expiresAt < Date.now()) {
-      this.sessions.delete(token);
-      return null;
-    }
-    const user = this.users.get(session.userId);
+    const payload = verifySessionToken(token);
+    if (!payload || !payload.userId) return null;
+
+    const user = this.users.get(payload.userId);
     if (!user || !user.is_active) return null;
     const { password_hash, ...safeUser } = user;
     return safeUser;
@@ -115,6 +108,13 @@ export class CommandCenterDb {
 
   getUsers() {
     return Array.from(this.users.values()).map(({ password_hash, ...u }) => u);
+  }
+
+  getUserById(id) {
+    const user = this.users.get(id);
+    if (!user) return null;
+    const { password_hash, ...safeUser } = user;
+    return safeUser;
   }
 
   updateUser(id, updates) {
@@ -146,8 +146,6 @@ export class CommandCenterDb {
   }
 
   getActiveDeviceForUser(authorityUserId) {
-    // §10.6: resolve the officer's currently-active device
-    // (is_active = true, most recent last_seen_at)
     const userDevices = Array.from(this.devices.values())
       .filter((d) => d.authority_user_id === authorityUserId && d.is_active)
       .sort((a, b) => new Date(b.last_seen_at) - new Date(a.last_seen_at));
@@ -218,74 +216,22 @@ export class CommandCenterDb {
     return cluster;
   }
 
-  /**
-   * Recalculate clusters from incidents using spatial centroid clustering.
-   * Groups geographically adjacent incidents (§10.5.2).
-   */
   recalculateClusters(incidents, thresholdMeters = 1000) {
-    // Clear existing active clusters
+    // Clear active clusters
     const activeClusters = Array.from(this.clusters.values()).filter((c) => c.status === "ACTIVE");
     for (const c of activeClusters) {
       this.clusters.delete(c.id);
     }
 
-    // Only cluster OPEN/EN_ROUTE incidents
-    const active = incidents.filter((i) => i.status_code === 1 || i.status_code === 2 || i.status_code === 3);
-    if (active.length === 0) return [];
-
-    // Simple distance-based clustering
-    const visited = new Set();
-    const newClusters = [];
-
-    for (const inc of active) {
-      if (visited.has(inc.id)) continue;
-      const members = [inc];
-      visited.add(inc.id);
-
-      for (const other of active) {
-        if (visited.has(other.id)) continue;
-        const dist = haversine(inc.latitude, inc.longitude, other.latitude, other.longitude);
-        if (dist <= thresholdMeters) {
-          members.push(other);
-          visited.add(other.id);
-        }
-      }
-
-      if (members.length >= 2) {
-        // Compute spherical centroid
-        let latSum = 0, lngSum = 0;
-        for (const m of members) {
-          latSum += m.latitude;
-          lngSum += m.longitude;
-        }
-        const centroidLat = latSum / members.length;
-        const centroidLng = lngSum / members.length;
-
-        // Compute radius (Haversine to furthest member)
-        let maxDist = 0;
-        for (const m of members) {
-          const d = haversine(centroidLat, centroidLng, m.latitude, m.longitude);
-          if (d > maxDist) maxDist = d;
-        }
-
-        // Aggregate severity (max severity of members)
-        const severityScore = Math.max(...members.map((m) => m.severity_level || 1));
-
-        const cluster = this.createCluster({
-          centroid_lat: centroidLat,
-          centroid_lng: centroidLng,
-          radius_meters: maxDist,
-          severity_score: severityScore,
-          incident_count: members.length,
-        });
-        newClusters.push(cluster);
-      }
+    const clusters = clusterIncidents(incidents, thresholdMeters);
+    const created = [];
+    for (const data of clusters) {
+      created.push(this.createCluster(data));
     }
-
-    return newClusters;
+    return created;
   }
 
-  // --- Squads (§10.6) ---
+  // --- Squads ---
 
   createSquad({ squad_name, leader_authority_user_id, zone_id }) {
     const id = randomUUID();
@@ -318,7 +264,6 @@ export class CommandCenterDb {
   }
 
   deleteSquad(id) {
-    // Also delete members
     for (const [memberId, member] of this.squadMembers) {
       if (member.squad_id === id) {
         this.squadMembers.delete(memberId);
@@ -328,10 +273,9 @@ export class CommandCenterDb {
   }
 
   addSquadMember({ squad_id, authority_user_id, role_in_squad }) {
-    // Check for existing membership (UNIQUE constraint)
     for (const member of this.squadMembers.values()) {
       if (member.squad_id === squad_id && member.authority_user_id === authority_user_id) {
-        return null; // already a member
+        return null; // unique constraint
       }
     }
     const id = randomUUID();
@@ -358,7 +302,7 @@ export class CommandCenterDb {
     return member;
   }
 
-  // --- Satellite Uplinks (§10.7) ---
+  // --- Satellite Uplinks ---
 
   createSatelliteUplink(data) {
     const id = randomUUID();
@@ -390,13 +334,8 @@ export class CommandCenterDb {
     return this.satelliteUplinks.get(id);
   }
 
-  // --- Dispatch (§10.6) ---
+  // --- Dispatch ---
 
-  /**
-   * Dispatch a responder to a zone by emitting an ASSIGN event via Edge Sync.
-   * §10.6: resolve the officer's currently-active REGISTERED_DEVICE
-   * and use its node_id as target_node_id.
-   */
   async dispatchResponder({ authority_user_id, zone_id, incident_id, admin_id }) {
     const device = this.getActiveDeviceForUser(authority_user_id);
     if (!device) {
@@ -417,10 +356,6 @@ export class CommandCenterDb {
     return { event, device };
   }
 
-  /**
-   * Dispatch an entire squad to a zone — emits N ASSIGN events
-   * (one per active squad member).
-   */
   async dispatchSquad({ squad_id, zone_id, admin_id }) {
     const squad = this.getSquadById(squad_id);
     if (!squad) return { error: "Squad not found" };
@@ -437,22 +372,391 @@ export class CommandCenterDb {
       results.push({ member_id: member.id, ...result });
     }
 
-    // Update squad's zone assignment
     this.updateSquad(squad_id, { zone_id });
-
     return { results, squad: this.getSquadById(squad_id) };
   }
 }
 
-// Haversine distance in meters
-function haversine(lat1, lng1, lat2, lng2) {
-  const R = 6371000; // Earth radius in meters
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLng = ((lng2 - lng1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) *
-    Math.sin(dLng / 2) * Math.sin(dLng / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
+// Alias for backward compatibility with existing tests
+export const CommandCenterDb = InMemoryDb;
+
+// ============================================================================
+// PostgreSQL Database for Command Center (Production)
+// ============================================================================
+
+export class PostgresDb {
+  constructor(pool) {
+    this.pool = pool;
+    this.edgeSyncClient = null;
+  }
+
+  async createUser({ username, password, full_name, clearance_level }) {
+    const pHash = hashPassword(password);
+    const result = await this.pool.query(
+      `INSERT INTO authority_user (username, password_hash, full_name, clearance_level)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, username, full_name, clearance_level, assigned_cluster_id, is_active, created_at`,
+      [username, pHash, full_name || username, clearance_level || CLEARANCE.DISPATCHER]
+    );
+    return result.rows[0];
+  }
+
+  async authenticate(username, password) {
+    const result = await this.pool.query(
+      `SELECT * FROM authority_user WHERE username = $1 AND is_active = true`,
+      [username]
+    );
+    const user = result.rows[0];
+    if (!user || !verifyPassword(password, user.password_hash)) {
+      return null;
+    }
+    const token = signSessionToken({
+      userId: user.id,
+      username: user.username,
+      clearance: user.clearance_level,
+    });
+    const { password_hash, ...safeUser } = user;
+    return { token, user: safeUser };
+  }
+
+  async getUserByToken(token) {
+    const payload = verifySessionToken(token);
+    if (!payload || !payload.userId) return null;
+
+    const result = await this.pool.query(
+      `SELECT id, username, full_name, clearance_level, assigned_cluster_id, is_active, created_at
+       FROM authority_user WHERE id = $1 AND is_active = true`,
+      [payload.userId]
+    );
+    return result.rows[0] || null;
+  }
+
+  async getUsers() {
+    const result = await this.pool.query(
+      `SELECT id, username, full_name, clearance_level, assigned_cluster_id, is_active, created_at
+       FROM authority_user ORDER BY created_at DESC`
+    );
+    return result.rows;
+  }
+
+  async getUserById(id) {
+    const result = await this.pool.query(
+      `SELECT id, username, full_name, clearance_level, assigned_cluster_id, is_active, created_at
+       FROM authority_user WHERE id = $1`,
+      [id]
+    );
+    return result.rows[0] || null;
+  }
+
+  async updateUser(id, updates) {
+    const fields = [];
+    const params = [id];
+    let idx = 2;
+
+    if (updates.is_active != null) {
+      fields.push(`is_active = $${idx++}`);
+      params.push(updates.is_active);
+    }
+    if (updates.clearance_level != null) {
+      fields.push(`clearance_level = $${idx++}`);
+      params.push(updates.clearance_level);
+    }
+    if (updates.full_name != null) {
+      fields.push(`full_name = $${idx++}`);
+      params.push(updates.full_name);
+    }
+    if (updates.assigned_cluster_id != null) {
+      fields.push(`assigned_cluster_id = $${idx++}`);
+      params.push(updates.assigned_cluster_id);
+    }
+
+    if (fields.length === 0) return this.getUserById(id);
+
+    const result = await this.pool.query(
+      `UPDATE authority_user SET ${fields.join(", ")} WHERE id = $1
+       RETURNING id, username, full_name, clearance_level, assigned_cluster_id, is_active, created_at`,
+      params
+    );
+    return result.rows[0] || null;
+  }
+
+  async registerDevice({ node_id, authority_user_id }) {
+    const result = await this.pool.query(
+      `INSERT INTO registered_device (node_id, authority_user_id, is_active, last_seen_at)
+       VALUES ($1, $2, true, now())
+       ON CONFLICT (node_id) DO UPDATE SET
+         authority_user_id = EXCLUDED.authority_user_id,
+         is_active = true,
+         last_seen_at = now()
+       RETURNING *`,
+      [node_id, authority_user_id]
+    );
+    return result.rows[0];
+  }
+
+  async getDevices() {
+    const result = await this.pool.query("SELECT * FROM registered_device ORDER BY registered_at DESC");
+    return result.rows;
+  }
+
+  async getActiveDeviceForUser(authorityUserId) {
+    const result = await this.pool.query(
+      `SELECT * FROM registered_device
+       WHERE authority_user_id = $1 AND is_active = true
+       ORDER BY last_seen_at DESC NULLS LAST LIMIT 1`,
+      [authorityUserId]
+    );
+    return result.rows[0] || null;
+  }
+
+  async revokeDevice(id) {
+    const result = await this.pool.query(
+      `UPDATE registered_device SET is_active = false WHERE id = $1 RETURNING *`,
+      [id]
+    );
+    return result.rows[0] || null;
+  }
+
+  async createZone({ area_name }) {
+    const result = await this.pool.query(
+      `INSERT INTO response_zone (area_name) VALUES ($1) RETURNING *`,
+      [area_name]
+    );
+    return result.rows[0];
+  }
+
+  async getZones() {
+    const result = await this.pool.query("SELECT * FROM response_zone ORDER BY area_name ASC");
+    return result.rows;
+  }
+
+  async updateZone(id, updates) {
+    const result = await this.pool.query(
+      `UPDATE response_zone SET area_name = $1, updated_at = now() WHERE id = $2 RETURNING *`,
+      [updates.area_name, id]
+    );
+    return result.rows[0] || null;
+  }
+
+  async deleteZone(id) {
+    const result = await this.pool.query("DELETE FROM response_zone WHERE id = $1 RETURNING id", [id]);
+    return result.rowCount > 0;
+  }
+
+  async createCluster(data) {
+    const result = await this.pool.query(
+      `INSERT INTO cluster (centroid_lat, centroid_lng, radius_meters, severity_score, incident_count, status)
+       VALUES ($1, $2, $3, $4, $5, 'ACTIVE') RETURNING *`,
+      [data.centroid_lat, data.centroid_lng, data.radius_meters, data.severity_score, data.incident_count]
+    );
+    return result.rows[0];
+  }
+
+  async getClusters() {
+    const result = await this.pool.query("SELECT * FROM cluster ORDER BY last_recalculated_at DESC");
+    return result.rows;
+  }
+
+  async resolveCluster(id, adminId) {
+    const result = await this.pool.query(
+      `UPDATE cluster SET status = 'RESOLVED', resolved_by_admin_id = $1, resolved_at = now() WHERE id = $2 RETURNING *`,
+      [adminId, id]
+    );
+    return result.rows[0] || null;
+  }
+
+  async recalculateClusters(incidents, thresholdMeters = 1000) {
+    await this.pool.query("DELETE FROM cluster WHERE status = 'ACTIVE'");
+    const clusters = clusterIncidents(incidents, thresholdMeters);
+    const created = [];
+    for (const c of clusters) {
+      created.push(await this.createCluster(c));
+    }
+    return created;
+  }
+
+  async createSquad({ squad_name, leader_authority_user_id, zone_id }) {
+    const result = await this.pool.query(
+      `INSERT INTO responder_squad (squad_name, leader_authority_user_id, zone_id)
+       VALUES ($1, $2, $3) RETURNING *`,
+      [squad_name, leader_authority_user_id, zone_id || null]
+    );
+    return result.rows[0];
+  }
+
+  async getSquads() {
+    const result = await this.pool.query("SELECT * FROM responder_squad WHERE is_active = true");
+    return result.rows;
+  }
+
+  async getSquadById(id) {
+    const result = await this.pool.query("SELECT * FROM responder_squad WHERE id = $1", [id]);
+    return result.rows[0] || null;
+  }
+
+  async updateSquad(id, updates) {
+    const fields = [];
+    const params = [id];
+    let idx = 2;
+
+    if (updates.squad_name != null) {
+      fields.push(`squad_name = $${idx++}`);
+      params.push(updates.squad_name);
+    }
+    if (updates.zone_id !== undefined) {
+      fields.push(`zone_id = $${idx++}`);
+      params.push(updates.zone_id);
+    }
+    if (updates.is_active != null) {
+      fields.push(`is_active = $${idx++}`);
+      params.push(updates.is_active);
+    }
+
+    if (fields.length === 0) return this.getSquadById(id);
+
+    fields.push("updated_at = now()");
+    const result = await this.pool.query(
+      `UPDATE responder_squad SET ${fields.join(", ")} WHERE id = $1 RETURNING *`,
+      params
+    );
+    return result.rows[0] || null;
+  }
+
+  async deleteSquad(id) {
+    await this.pool.query("DELETE FROM squad_member WHERE squad_id = $1", [id]);
+    const result = await this.pool.query("DELETE FROM responder_squad WHERE id = $1 RETURNING id", [id]);
+    return result.rowCount > 0;
+  }
+
+  async addSquadMember({ squad_id, authority_user_id, role_in_squad }) {
+    try {
+      const result = await this.pool.query(
+        `INSERT INTO squad_member (squad_id, authority_user_id, role_in_squad)
+         VALUES ($1, $2, $3) RETURNING *`,
+        [squad_id, authority_user_id, role_in_squad || "RESCUER"]
+      );
+      return result.rows[0];
+    } catch {
+      return null; // unique violation or FK violation
+    }
+  }
+
+  async getSquadMembers(squadId) {
+    const result = await this.pool.query(
+      `SELECT * FROM squad_member WHERE squad_id = $1 AND is_active = true`,
+      [squadId]
+    );
+    return result.rows;
+  }
+
+  async removeSquadMember(memberId) {
+    const result = await this.pool.query(
+      `UPDATE squad_member SET is_active = false WHERE id = $1 RETURNING *`,
+      [memberId]
+    );
+    return result.rows[0] || null;
+  }
+
+  async createSatelliteUplink(data) {
+    const result = await this.pool.query(
+      `INSERT INTO satellite_uplink (uplink_name, uplink_type, is_connected, bandwidth_kbps,
+        queue_depth_critical, queue_depth_high, queue_depth_normal)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [
+        data.uplink_name,
+        data.uplink_type,
+        data.is_connected || false,
+        data.bandwidth_kbps || 0,
+        data.queue_depth_critical || 0,
+        data.queue_depth_high || 0,
+        data.queue_depth_normal || 0,
+      ]
+    );
+    return result.rows[0];
+  }
+
+  async getSatelliteUplinks() {
+    const result = await this.pool.query("SELECT * FROM satellite_uplink ORDER BY uplink_name ASC");
+    return result.rows;
+  }
+
+  async updateSatelliteUplink(id, updates) {
+    const fields = [];
+    const params = [id];
+    let idx = 2;
+
+    if (updates.is_connected != null) {
+      fields.push(`is_connected = $${idx++}`);
+      params.push(updates.is_connected);
+    }
+    if (updates.bandwidth_kbps != null) {
+      fields.push(`bandwidth_kbps = $${idx++}`);
+      params.push(updates.bandwidth_kbps);
+    }
+    if (updates.queue_depth_critical != null) {
+      fields.push(`queue_depth_critical = $${idx++}`);
+      params.push(updates.queue_depth_critical);
+    }
+    if (updates.last_sync_at) {
+      fields.push(`last_sync_at = $${idx++}`);
+      params.push(new Date(updates.last_sync_at));
+    }
+
+    if (fields.length === 0) return null;
+
+    fields.push("updated_at = now()");
+    const result = await this.pool.query(
+      `UPDATE satellite_uplink SET ${fields.join(", ")} WHERE id = $1 RETURNING *`,
+      params
+    );
+    return result.rows[0] || null;
+  }
+
+  async dispatchResponder({ authority_user_id, zone_id, incident_id, admin_id }) {
+    const device = await this.getActiveDeviceForUser(authority_user_id);
+    if (!device) {
+      return { error: "No active device for this user" };
+    }
+
+    if (!this.edgeSyncClient) {
+      return { error: "Edge Sync client not configured" };
+    }
+
+    const event = await this.edgeSyncClient.emitAssign({
+      target_node_id: device.node_id,
+      target_zone_id: zone_id,
+      incident_id,
+      assigned_by_admin_id: admin_id,
+    });
+
+    return { event, device };
+  }
+
+  async dispatchSquad({ squad_id, zone_id, admin_id }) {
+    const squad = await this.getSquadById(squad_id);
+    if (!squad) return { error: "Squad not found" };
+
+    const members = await this.getSquadMembers(squad_id);
+    const results = [];
+
+    for (const member of members) {
+      const result = await this.dispatchResponder({
+        authority_user_id: member.authority_user_id,
+        zone_id,
+        admin_id,
+      });
+      results.push({ member_id: member.id, ...result });
+    }
+
+    await this.updateSquad(squad_id, { zone_id });
+    const updatedSquad = await this.getSquadById(squad_id);
+    return { results, squad: updatedSquad };
+  }
+}
+
+export function createDb(usePostgres = false, pool = null) {
+  if (usePostgres && pool) {
+    return new PostgresDb(pool);
+  }
+  return new InMemoryDb();
 }
