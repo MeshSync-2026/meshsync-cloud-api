@@ -1,0 +1,14 @@
+{
+  "name": "@meshsync/command-center",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test tests/*.test.js"
+  },
+  "dependencies": {
+    "@meshsync/shared": "file:../shared",
+    "pg": "^8.13.3"
+  }
+}
