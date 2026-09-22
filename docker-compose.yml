@@ -1,0 +1,76 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: meshsync-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: meshsync
+      POSTGRES_PASSWORD: meshsync_secure_password
+      POSTGRES_DB: meshsync
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations/001_initial_schema.sql:/docker-entrypoint-initdb.d/001_initial_schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meshsync -d meshsync"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  edge-sync:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: meshsync-edge-sync
+    restart: unless-stopped
+    command: ["node", "packages/edge-sync/src/server.js"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      EDGE_SYNC_PORT: 4001
+      INTERNAL_API_SECRET: internal-meshsync-secret-key-prod
+      DATABASE_URL: postgres://meshsync:meshsync_secure_password@postgres:5432/meshsync
+    ports:
+      - "4001:4001"
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:4001/health').then(r => r.ok ? process.exit(0) : process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  command-center:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: meshsync-command-center
+    restart: unless-stopped
+    command: ["node", "packages/command-center/src/server.js"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      edge-sync:
+        condition: service_started
+    environment:
+      NODE_ENV: production
+      CC_PORT: 4002
+      SESSION_SECRET: meshsync-session-secret-key-prod-32b
+      INTERNAL_API_SECRET: internal-meshsync-secret-key-prod
+      DATABASE_URL: postgres://meshsync:meshsync_secure_password@postgres:5432/meshsync
+      EDGE_SYNC_URL: http://edge-sync:4001
+    ports:
+      - "4002:4002"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:4002/health').then(r => r.ok ? process.exit(0) : process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  pgdata:
+    driver: local

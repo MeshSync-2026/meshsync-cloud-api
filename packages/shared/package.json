@@ -9,7 +9,8 @@
     "./enums": "./src/enums.js",
     "./fold": "./src/fold.js",
     "./priority": "./src/priority.js",
-    "./validation": "./src/validation.js"
+    "./validation": "./src/validation.js",
+    "./auth": "./src/auth.js"
   },
   "scripts": {
     "test": "node --test src/*.test.js"
