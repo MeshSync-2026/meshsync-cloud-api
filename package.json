@@ -28,5 +28,8 @@
   "bugs": {
     "url": "https://github.com/MeshSync-2026/meshsync-command-center/issues"
   },
-  "homepage": "https://github.com/MeshSync-2026/meshsync-command-center#readme"
+  "homepage": "https://github.com/MeshSync-2026/meshsync-command-center#readme",
+  "dependencies": {
+    "pg": "^8.23.0"
+  }
 }
