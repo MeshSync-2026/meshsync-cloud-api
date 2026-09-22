@@ -307,10 +307,13 @@ describe("Command Center — HTTP server", () => {
   });
 
   test("GET /zones returns seeded zones", async () => {
-    const { server } = createServer();
+    const { server, db } = createServer();
     const port = await listen(server);
+    const { token } = db.authenticate("anjali@meshsync.lk", "demo1234");
     try {
-      const res = await fetch(`http://localhost:${port}/zones`);
+      const res = await fetch(`http://localhost:${port}/zones`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
       const body = await res.json();
       assert.equal(res.status, 200);
       assert.ok(body.zones.length >= 5);
@@ -320,10 +323,13 @@ describe("Command Center — HTTP server", () => {
   });
 
   test("GET /squads returns squads list", async () => {
-    const { server } = createServer();
+    const { server, db } = createServer();
     const port = await listen(server);
+    const { token } = db.authenticate("anjali@meshsync.lk", "demo1234");
     try {
-      const res = await fetch(`http://localhost:${port}/squads`);
+      const res = await fetch(`http://localhost:${port}/squads`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
       const body = await res.json();
       assert.equal(res.status, 200);
       assert.ok(body.squads);
@@ -333,10 +339,13 @@ describe("Command Center — HTTP server", () => {
   });
 
   test("GET /satellite returns uplinks", async () => {
-    const { server } = createServer();
+    const { server, db } = createServer();
     const port = await listen(server);
+    const { token } = db.authenticate("anjali@meshsync.lk", "demo1234");
     try {
-      const res = await fetch(`http://localhost:${port}/satellite`);
+      const res = await fetch(`http://localhost:${port}/satellite`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
       const body = await res.json();
       assert.equal(res.status, 200);
       assert.ok(body.uplinks.length >= 3);
@@ -348,11 +357,12 @@ describe("Command Center — HTTP server", () => {
   test("POST /squads creates a squad", async () => {
     const { server, db } = createServer();
     const port = await listen(server);
+    const { token } = db.authenticate("anjali@meshsync.lk", "demo1234");
     try {
       const user = db.getUsers()[0];
       const res = await fetch(`http://localhost:${port}/squads`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({ squad_name: "HTTP Squad", leader_authority_user_id: user.id }),
       });
       const body = await res.json();
