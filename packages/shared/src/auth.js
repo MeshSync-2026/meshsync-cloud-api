@@ -5,7 +5,16 @@ import crypto from "node:crypto";
 
 const DEFAULT_KEY_LEN = 64;
 const DEFAULT_SALT_LEN = 16;
-const DEFAULT_SECRET = process.env.SESSION_SECRET || "meshsync-production-session-secret-key-32b!";
+const RANDOM_DEV_SECRET = crypto.randomBytes(32).toString("hex");
+
+export function getEffectiveSecret(secret = null) {
+  if (secret) return secret;
+  if (process.env.SESSION_SECRET) return process.env.SESSION_SECRET;
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("[Security] SESSION_SECRET environment variable is required in production mode.");
+  }
+  return RANDOM_DEV_SECRET;
+}
 
 /**
  * Hash a password using scrypt with a unique random salt.
@@ -67,7 +76,8 @@ export function verifyPassword(password, storedHash) {
  * @param {number} expiresInMs - Expiration duration in milliseconds (default 24h)
  * @returns {string} Signed token string
  */
-export function signSessionToken(payload, secret = DEFAULT_SECRET, expiresInMs = 24 * 60 * 60 * 1000) {
+export function signSessionToken(payload, secret = null, expiresInMs = 24 * 60 * 60 * 1000) {
+  const effectiveSecret = getEffectiveSecret(secret);
   const tokenPayload = {
     ...payload,
     exp: Date.now() + expiresInMs,
@@ -75,7 +85,7 @@ export function signSessionToken(payload, secret = DEFAULT_SECRET, expiresInMs =
   };
 
   const payloadB64 = Buffer.from(JSON.stringify(tokenPayload)).toString("base64url");
-  const signature = crypto.createHmac("sha256", secret).update(payloadB64).digest("base64url");
+  const signature = crypto.createHmac("sha256", effectiveSecret).update(payloadB64).digest("base64url");
   return `${payloadB64}.${signature}`;
 }
 
@@ -86,14 +96,21 @@ export function signSessionToken(payload, secret = DEFAULT_SECRET, expiresInMs =
  * @param {string} secret - Secret key for HMAC
  * @returns {object|null} Parsed payload if valid and not expired, null otherwise
  */
-export function verifySessionToken(token, secret = DEFAULT_SECRET) {
+export function verifySessionToken(token, secret = null) {
   if (!token || typeof token !== "string") return null;
 
   const parts = token.split(".");
   if (parts.length !== 2) return null;
 
+  let effectiveSecret;
+  try {
+    effectiveSecret = getEffectiveSecret(secret);
+  } catch {
+    return null;
+  }
+
   const [payloadB64, signature] = parts;
-  const expectedSignature = crypto.createHmac("sha256", secret).update(payloadB64).digest("base64url");
+  const expectedSignature = crypto.createHmac("sha256", effectiveSecret).update(payloadB64).digest("base64url");
 
   if (signature.length !== expectedSignature.length) return null;
   if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSignature))) {
