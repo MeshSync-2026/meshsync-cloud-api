@@ -22,13 +22,30 @@ import crypto from "node:crypto";
 import zlib from "node:zlib";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import pg from "pg";
 import { createDb } from "./db.js";
 
 const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10MB limit
-const INTERNAL_API_SECRET = process.env.INTERNAL_API_SECRET || "internal-meshsync-key-secret";
+const RANDOM_DEV_SECRET = crypto.randomBytes(32).toString("hex");
+
+export function getInternalApiSecret() {
+    if (process.env.INTERNAL_API_SECRET) return process.env.INTERNAL_API_SECRET;
+    if (process.env.NODE_ENV === "production") {
+        throw new Error("[Security] INTERNAL_API_SECRET environment variable is required in production mode.");
+    }
+    return RANDOM_DEV_SECRET;
+}
 
 export function createServer(db = null) {
-    const database = db || createDb(false);
+    let database = db;
+    if (!database) {
+        if (process.env.DATABASE_URL) {
+            const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+            database = createDb(true, pool);
+        } else {
+            database = createDb(false);
+        }
+    }
 
     // --- WebSocket clients (for real-time event push to phones) ---
     const wsClients = new Set();
@@ -196,16 +213,11 @@ export function createServer(db = null) {
             const path = url.pathname;
             const method = req.method;
 
-            // WebSocket upgrade
-            if (path === "/ws" && req.headers.upgrade === "websocket") {
-                handleWsUpgrade(req, res.socket);
-                return;
-            }
-
-            // CORS headers (for dashboard dev server)
-            res.setHeader("Access-Control-Allow-Origin", "*");
+            // CORS headers
+            const allowedOrigin = process.env.CORS_ORIGIN || "*";
+            res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
             res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-            res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+            res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, x-internal-token");
             if (method === "OPTIONS") {
                 res.writeHead(204);
                 res.end();
@@ -230,6 +242,12 @@ export function createServer(db = null) {
                 } catch {
                     res.writeHead(400);
                     res.end(JSON.stringify({ error: "Invalid JSON" }));
+                    return;
+                }
+
+                if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.events)) {
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: "Invalid payload: 'events' array is required" }));
                     return;
                 }
 
@@ -384,9 +402,17 @@ export function createServer(db = null) {
 
             // --- POST /internal/assign (called by Command Center Service) ---
             if (path === "/internal/assign" && method === "POST") {
-                // Internal API token check (if secret is configured in production environment)
                 const internalToken = req.headers["x-internal-token"];
-                if (process.env.NODE_ENV === "production" && internalToken !== INTERNAL_API_SECRET) {
+                let expectedSecret;
+                try {
+                    expectedSecret = getInternalApiSecret();
+                } catch (err) {
+                    res.writeHead(500);
+                    res.end(JSON.stringify({ error: err.message }));
+                    return;
+                }
+
+                if (!internalToken || internalToken !== expectedSecret) {
                     res.writeHead(403);
                     res.end(JSON.stringify({ error: "Forbidden: invalid internal token" }));
                     return;
@@ -422,8 +448,22 @@ export function createServer(db = null) {
             res.end(JSON.stringify({ error: "Not found", path }));
         } catch (err) {
             console.error("Edge Sync error:", err);
-            res.writeHead(500);
-            res.end(JSON.stringify({ error: "Internal server error", detail: err.message }));
+            const status = err.statusCode || err.status || 500;
+            res.writeHead(status);
+            const responseBody = status >= 500
+                ? { error: "Internal server error" }
+                : { error: err.message };
+            res.end(JSON.stringify(responseBody));
+        }
+    });
+
+    // Register WebSocket upgrade event on the server
+    server.on("upgrade", (req, socket, head) => {
+        const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+        if (url.pathname === "/ws") {
+            handleWsUpgrade(req, socket);
+        } else {
+            socket.destroy();
         }
     });
 
@@ -444,7 +484,7 @@ function readBody(req, maxBytes = MAX_BODY_BYTES) {
             totalBytes += chunk.length;
             if (totalBytes > maxBytes) {
                 const err = new Error("Payload Too Large");
-                err.status = 413;
+                err.statusCode = 413;
                 req.destroy(err);
                 reject(err);
                 return;
@@ -458,20 +498,21 @@ function readBody(req, maxBytes = MAX_BODY_BYTES) {
 
             try {
                 if (encoding === "gzip" || encoding === "x-gzip") {
-                    const decompressed = zlib.gunzipSync(rawBuffer);
+                    const decompressed = zlib.gunzipSync(rawBuffer, { maxOutputLength: maxBytes });
                     resolve(decompressed.toString("utf8"));
                 } else if (encoding === "deflate") {
-                    const decompressed = zlib.inflateSync(rawBuffer);
+                    const decompressed = zlib.inflateSync(rawBuffer, { maxOutputLength: maxBytes });
                     resolve(decompressed.toString("utf8"));
                 } else if (encoding === "br") {
-                    const decompressed = zlib.brotliDecompressSync(rawBuffer);
+                    const decompressed = zlib.brotliDecompressSync(rawBuffer, { maxOutputLength: maxBytes });
                     resolve(decompressed.toString("utf8"));
                 } else {
                     resolve(rawBuffer.toString("utf8"));
                 }
             } catch (decompErr) {
+                const isTooLarge = decompErr.code === "ERR_BUFFER_TOO_LARGE" || decompErr.message?.includes("output length");
                 const err = new Error(`Decompression failed (${encoding}): ${decompErr.message}`);
-                err.status = 400;
+                err.statusCode = isTooLarge ? 413 : 400;
                 reject(err);
             }
         });
