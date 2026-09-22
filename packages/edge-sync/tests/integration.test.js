@@ -156,7 +156,9 @@ describe("Integration — Full Data Mule round-trip", () => {
             });
 
             // Get a zone
-            const zonesRes = await fetch(`http://localhost:${ccPort}/zones`);
+            const zonesRes = await fetch(`http://localhost:${ccPort}/zones`, {
+                headers: { Authorization: `Bearer ${token}` },
+            });
             const zonesBody = await zonesRes.json();
             const zone = zonesBody.zones[0];
 
@@ -285,9 +287,19 @@ describe("Integration — Full Data Mule round-trip", () => {
                 }),
             });
 
+            // Login as commander
+            const loginRes = await fetch(`http://localhost:${ccPort}/auth/login`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ username: "anjali@meshsync.lk", password: "demo1234" }),
+            });
+            const loginBody = await loginRes.json();
+            const token = loginBody.token;
+
             // Recalculate clusters
             const res = await fetch(`http://localhost:${ccPort}/clusters/recalculate`, {
                 method: "POST",
+                headers: { Authorization: `Bearer ${token}` },
             });
             const body = await res.json();
             assert.equal(res.status, 200);
