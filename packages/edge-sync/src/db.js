@@ -123,12 +123,15 @@ export class InMemoryDb {
      * Emit a cloud origin ASSIGN event.
      * The Command Center Service calls this to dispatch a responder.
      */
-    async emitAssignEvent({ targetNodeId, targetZoneId, incidentId = null, assignedByAdminId }) {
+    async emitAssignEvent({ targetNodeId, targetZoneId, incidentId = null, assignedByAdminId = null }) {
         const hlc = this.cloudClock.tick();
+        const eventId = `cloud-assign-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const now = Date.now();
+        const incId = incidentId || `assign-${now}`;
         const event = {
-            id: `cloud-assign-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            id: eventId,
             parent_id: null,
-            incident_id: incidentId || `assign-${Date.now()}`,
+            incident_id: incId,
             origin_node_id: CLOUD_NODE_ID,
             seq: 0,
             event_type_code: EVENT_TYPE.ASSIGN,
@@ -146,10 +149,18 @@ export class InMemoryDb {
             target_node_id: targetNodeId,
             target_zone_id: targetZoneId,
             hlc_timestamp: hlc,
-            created_at: Date.now(),
+            assigned_by_admin_id: assignedByAdminId,
+            created_at: now,
         };
         this.meshEvents.set(event.id, { ...event, first_ingested_at: new Date().toISOString() });
         await this.rebuildProjections();
+        if (assignedByAdminId) {
+            for (const assign of this.assignments.values()) {
+                if (assign.source_mesh_event_id === eventId || (assign.target_node_id === targetNodeId && assign.incident_id === incId)) {
+                    assign.assigned_by_admin_id = assignedByAdminId;
+                }
+            }
+        }
         return event;
     }
 
@@ -243,6 +254,7 @@ export class PostgresDb {
 
             let newCount = 0;
             let duplicateCount = 0;
+            let rejectedDbCount = 0;
             const items = [];
 
             for (const evt of valid) {
@@ -274,6 +286,7 @@ export class PostgresDb {
                         items.push({ batch_id: batchId, table_name: "MESH_EVENT", row_id: evt.id, outcome: "duplicate_ignored", error_detail: null });
                     }
                 } catch (err) {
+                    rejectedDbCount++;
                     items.push({ batch_id: batchId, table_name: "MESH_EVENT", row_id: evt.id, outcome: "rejected", error_detail: err.message });
                 }
             }
@@ -282,10 +295,12 @@ export class PostgresDb {
                 items.push({ batch_id: batchId, table_name: "MESH_EVENT", row_id: event?.id || null, outcome: "rejected", error_detail: errors.join("; ") });
             }
 
+            const totalRejected = invalid.length + rejectedDbCount;
+
             // Update batch counts
             await client.query(
                 `UPDATE ingestion_batch SET new_count = $1, duplicate_count = $2, rejected_count = $3 WHERE id = $4`,
-                [newCount, duplicateCount, invalid.length, batchId]
+                [newCount, duplicateCount, totalRejected, batchId]
             );
 
             // Insert batch items
@@ -305,8 +320,8 @@ export class PostgresDb {
             await this.rebuildProjections(affectedIncidentIds);
 
             return {
-                batch: { id: batchId, new_count: newCount, duplicate_count: duplicateCount, rejected_count: invalid.length },
-                newCount, duplicateCount, rejectedCount: invalid.length, items,
+                batch: { id: batchId, new_count: newCount, duplicate_count: duplicateCount, rejected_count: totalRejected },
+                newCount, duplicateCount, rejectedCount: totalRejected, items,
             };
         } catch (err) {
             await client.query("ROLLBACK");
@@ -329,7 +344,21 @@ export class PostgresDb {
         const events = result.rows.map((r) => ({ ...r, created_at: new Date(r.created_at).getTime() }));
         const folded = foldPipeline(events, this.cloudClock.getPhysical());
 
+        // Handle deleted/tombstoned projections
+        if (affectedIncidentIds && affectedIncidentIds.size > 0) {
+            const affectedArray = Array.from(affectedIncidentIds);
+            const foldedIds = new Set(folded.incidents.map((i) => i.id));
+            const deletedIds = affectedArray.filter((id) => !foldedIds.has(id));
+            if (deletedIds.length > 0) {
+                await this.pool.query(`DELETE FROM incident_responder WHERE incident_id = ANY($1::text[])`, [deletedIds]);
+                await this.pool.query(`DELETE FROM incident_history WHERE incident_id = ANY($1::text[])`, [deletedIds]);
+                await this.pool.query(`DELETE FROM mesh_assignment WHERE incident_id = ANY($1::text[])`, [deletedIds]);
+                await this.pool.query(`DELETE FROM incident WHERE id = ANY($1::text[])`, [deletedIds]);
+            }
+        }
+
         // Upsert incidents
+        const foldedIncidentIds = new Set(folded.incidents.map((i) => i.id));
         for (const inc of folded.incidents) {
             await this.pool.query(
                 `INSERT INTO incident (
@@ -370,8 +399,16 @@ export class PostgresDb {
             );
         }
 
-        // Insert incident history
+        // Insert incident history (safely ensuring parent incident exists for out-of-order events)
         for (const h of folded.history) {
+            if (!foldedIncidentIds.has(h.incident_id)) {
+                await this.pool.query(
+                    `INSERT INTO incident (id, creator_node_id, latitude, longitude, report_type_code, status_code, confidence_code, created_at, updated_at)
+                     VALUES ($1, $2, 0, 0, 1, 1, 2, $3, $3)
+                     ON CONFLICT (id) DO NOTHING`,
+                    [h.incident_id, h.actor_node_id || 'unknown', new Date(h.created_at || Date.now())]
+                );
+            }
             const hId = `${h.source_mesh_event_id || h.incident_id + '-' + h.hlc_timestamp}`;
             await this.pool.query(
                 `INSERT INTO incident_history (id, incident_id, actor_node_id, action_type_code, hlc_timestamp, source_mesh_event_id, created_at)
@@ -396,19 +433,41 @@ export class PostgresDb {
         }
     }
 
-    async emitAssignEvent({ targetNodeId, targetZoneId, incidentId = null, assignedByAdminId }) {
+    async emitAssignEvent({ targetNodeId, targetZoneId, incidentId = null, assignedByAdminId = null }) {
         const hlc = this.cloudClock.tick();
         const eventId = `cloud-assign-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const now = new Date();
+        const incId = incidentId || `assign-${Date.now()}`;
         await this.pool.query(
             `INSERT INTO mesh_event (id, incident_id, origin_node_id, seq, event_type_code,
         actor_role_code, target_node_id, target_zone_id, hlc_timestamp, created_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-            [eventId, incidentId || `assign-${Date.now()}`, CLOUD_NODE_ID, 0, EVENT_TYPE.ASSIGN,
-                3, targetNodeId, targetZoneId, hlc, new Date()]
+            [eventId, incId, CLOUD_NODE_ID, 0, EVENT_TYPE.ASSIGN,
+                3, targetNodeId, targetZoneId, hlc, now]
         );
         const affectedIncidents = incidentId ? new Set([incidentId]) : null;
         await this.rebuildProjections(affectedIncidents);
-        return { id: eventId, hlc_timestamp: hlc, target_node_id: targetNodeId, target_zone_id: targetZoneId };
+
+        if (assignedByAdminId) {
+            await this.pool.query(
+                `UPDATE mesh_assignment SET assigned_by_admin_id = $1 WHERE source_mesh_event_id = $2 OR (responder_node_id = $3)`,
+                [assignedByAdminId, eventId, targetNodeId]
+            );
+        }
+
+        return {
+            id: eventId,
+            incident_id: incId,
+            origin_node_id: CLOUD_NODE_ID,
+            seq: 0,
+            event_type_code: EVENT_TYPE.ASSIGN,
+            actor_role_code: 3,
+            target_node_id: targetNodeId,
+            target_zone_id: targetZoneId,
+            hlc_timestamp: hlc,
+            assigned_by_admin_id: assignedByAdminId,
+            created_at: now.getTime(),
+        };
     }
 
     async getIncidents(filters = {}) {
