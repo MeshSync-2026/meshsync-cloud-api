@@ -65,7 +65,7 @@ export class InMemoryDb {
 
   // --- Auth ---
 
-  createUser({ username, password, full_name, clearance_level }) {
+  createUser({ username, password, full_name, clearance_level, is_active = true }) {
     const id = randomUUID();
     const user = {
       id,
@@ -74,7 +74,7 @@ export class InMemoryDb {
       full_name: full_name || username,
       clearance_level: clearance_level || CLEARANCE.DISPATCHER,
       assigned_cluster_id: null,
-      is_active: true,
+      is_active: Boolean(is_active),
       created_at: new Date().toISOString(),
     };
     this.users.set(id, user);
@@ -83,7 +83,10 @@ export class InMemoryDb {
 
   authenticate(username, password) {
     for (const user of this.users.values()) {
-      if (user.username === username && user.is_active && verifyPassword(password, user.password_hash)) {
+      if (user.username === username && verifyPassword(password, user.password_hash)) {
+        if (!user.is_active) {
+          return null;
+        }
         const token = signSessionToken({
           userId: user.id,
           username: user.username,
@@ -390,24 +393,24 @@ export class PostgresDb {
     this.edgeSyncClient = null;
   }
 
-  async createUser({ username, password, full_name, clearance_level }) {
+  async createUser({ username, password, full_name, clearance_level, is_active = false }) {
     const pHash = hashPassword(password);
     const result = await this.pool.query(
-      `INSERT INTO authority_user (username, password_hash, full_name, clearance_level)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO authority_user (username, password_hash, full_name, clearance_level, is_active)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING id, username, full_name, clearance_level, assigned_cluster_id, is_active, created_at`,
-      [username, pHash, full_name || username, clearance_level || CLEARANCE.DISPATCHER]
+      [username, pHash, full_name || username, clearance_level || CLEARANCE.DISPATCHER, is_active]
     );
     return result.rows[0];
   }
 
   async authenticate(username, password) {
     const result = await this.pool.query(
-      `SELECT * FROM authority_user WHERE username = $1 AND is_active = true`,
+      `SELECT * FROM authority_user WHERE username = $1`,
       [username]
     );
     const user = result.rows[0];
-    if (!user || !verifyPassword(password, user.password_hash)) {
+    if (!user || !user.is_active || !verifyPassword(password, user.password_hash)) {
       return null;
     }
     const token = signSessionToken({
