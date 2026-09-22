@@ -13,6 +13,7 @@
     "test:shared": "node --test packages/shared/src/*.test.js",
     "test:edge": "node --test packages/edge-sync/tests/*.test.js",
     "test:cc": "node --test packages/command-center/tests/*.test.js",
+    "test:live": "node scripts/test-live-server.js",
     "start:edge": "node packages/edge-sync/src/server.js",
     "start:cc": "node packages/command-center/src/server.js"
   },
