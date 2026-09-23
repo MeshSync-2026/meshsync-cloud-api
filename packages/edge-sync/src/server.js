@@ -40,7 +40,12 @@ export function createServer(db = null) {
     let database = db;
     if (!database) {
         if (process.env.DATABASE_URL) {
-            const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+            const dbUrl = process.env.DATABASE_URL;
+            const isLocal = dbUrl.includes("localhost") || dbUrl.includes("127.0.0.1") || dbUrl.includes("@postgres:");
+            const pool = new pg.Pool({
+                connectionString: dbUrl,
+                ssl: isLocal ? false : { rejectUnauthorized: false },
+            });
             database = createDb(true, pool);
         } else {
             database = createDb(false);
