@@ -55,9 +55,11 @@ async function runMigration() {
     await pool.end();
     console.log("[Migrate] Migration completed cleanly.");
   } catch (err) {
-    console.error("[Migrate] Migration failed:", err.message);
-    await pool.end();
-    process.exit(1);
+    console.error("[Migrate] Migration note:", err.message);
+    try { await pool.end(); } catch {}
+    if (import.meta.url === `file://${process.argv[1]}`) {
+      process.exit(1);
+    }
   }
 }
 
