@@ -599,6 +599,14 @@ function parseWsFrame(buffer) {
 // Start server if run directly
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
     const port = process.env.PORT || process.env.EDGE_SYNC_PORT || 4001;
+    if (process.env.DATABASE_URL) {
+        try {
+            const { runMigration } = await import("../../../migrations/migrate.js");
+            await runMigration();
+        } catch (err) {
+            console.error("[Startup] Database migration notice:", err.message);
+        }
+    }
     const { server } = createServer();
     server.listen(port, () => {
         console.log(`Edge Sync Service running on http://localhost:${port}`);
