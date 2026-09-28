@@ -25,11 +25,11 @@ CREATE TABLE IF NOT EXISTS mesh_event (
     first_ingested_at timestamptz DEFAULT now()    
 );
 
-CREATE INDEX idx_mesh_event_incident ON mesh_event (incident_id);
-CREATE INDEX idx_mesh_event_hlc ON mesh_event (hlc_timestamp);
-CREATE INDEX idx_mesh_event_origin_seq ON mesh_event (origin_node_id, seq);
-CREATE INDEX idx_mesh_event_type ON mesh_event (event_type_code);
-CREATE INDEX idx_mesh_event_incident_hlc ON mesh_event (incident_id, hlc_timestamp);
+CREATE INDEX IF NOT EXISTS idx_mesh_event_incident ON mesh_event (incident_id);
+CREATE INDEX IF NOT EXISTS idx_mesh_event_hlc ON mesh_event (hlc_timestamp);
+CREATE INDEX IF NOT EXISTS idx_mesh_event_origin_seq ON mesh_event (origin_node_id, seq);
+CREATE INDEX IF NOT EXISTS idx_mesh_event_type ON mesh_event (event_type_code);
+CREATE INDEX IF NOT EXISTS idx_mesh_event_incident_hlc ON mesh_event (incident_id, hlc_timestamp);
 
 CREATE TABLE IF NOT EXISTS incident (
     id              text PRIMARY KEY,          -- same UUID across all replicas
@@ -57,10 +57,10 @@ CREATE TABLE IF NOT EXISTS incident (
     first_ingested_at timestamptz DEFAULT now()
 );
 
-CREATE INDEX idx_incident_cluster_status ON incident (cluster_id, status_code);
-CREATE INDEX idx_incident_zone ON incident (zone_id);
-CREATE INDEX idx_incident_created ON incident (created_at DESC);
-CREATE INDEX idx_incident_confidence ON incident (confidence_code);
+CREATE INDEX IF NOT EXISTS idx_incident_cluster_status ON incident (cluster_id, status_code);
+CREATE INDEX IF NOT EXISTS idx_incident_zone ON incident (zone_id);
+CREATE INDEX IF NOT EXISTS idx_incident_created ON incident (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_incident_confidence ON incident (confidence_code);
 
 CREATE TABLE IF NOT EXISTS incident_responder (
     id                  text PRIMARY KEY,
@@ -71,8 +71,8 @@ CREATE TABLE IF NOT EXISTS incident_responder (
     joined_at           timestamptz NOT NULL
 );
 
-CREATE INDEX idx_responder_incident ON incident_responder (incident_id);
-CREATE INDEX idx_responder_node ON incident_responder (responder_node_id);
+CREATE INDEX IF NOT EXISTS idx_responder_incident ON incident_responder (incident_id);
+CREATE INDEX IF NOT EXISTS idx_responder_node ON incident_responder (responder_node_id);
 
 CREATE TABLE IF NOT EXISTS incident_history (
     id                      text PRIMARY KEY,
@@ -85,8 +85,8 @@ CREATE TABLE IF NOT EXISTS incident_history (
     created_at              timestamptz NOT NULL -- device origin
 );
 
-CREATE INDEX idx_history_incident ON incident_history (incident_id);
-CREATE INDEX idx_history_action ON incident_history (action_type_code);
+CREATE INDEX IF NOT EXISTS idx_history_incident ON incident_history (incident_id);
+CREATE INDEX IF NOT EXISTS idx_history_action ON incident_history (action_type_code);
 
 CREATE TABLE IF NOT EXISTS authority_user (
     id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -108,8 +108,8 @@ CREATE TABLE IF NOT EXISTS registered_device (
     last_seen_at        timestamptz
 );
 
-CREATE INDEX idx_device_user ON registered_device (authority_user_id);
-CREATE INDEX idx_device_active ON registered_device (is_active);
+CREATE INDEX IF NOT EXISTS idx_device_user ON registered_device (authority_user_id);
+CREATE INDEX IF NOT EXISTS idx_device_active ON registered_device (is_active);
 
 CREATE TABLE IF NOT EXISTS cluster (
     id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -142,8 +142,8 @@ CREATE TABLE IF NOT EXISTS mesh_assignment (
     updated_at              timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_assignment_responder ON mesh_assignment (responder_node_id);
-CREATE INDEX idx_assignment_zone ON mesh_assignment (zone_id);
+CREATE INDEX IF NOT EXISTS idx_assignment_responder ON mesh_assignment (responder_node_id);
+CREATE INDEX IF NOT EXISTS idx_assignment_zone ON mesh_assignment (zone_id);
 
 CREATE TABLE IF NOT EXISTS responder_squad (
     id                          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -155,8 +155,8 @@ CREATE TABLE IF NOT EXISTS responder_squad (
     updated_at                  timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_squad_leader ON responder_squad (leader_authority_user_id);
-CREATE INDEX idx_squad_zone ON responder_squad (zone_id);
+CREATE INDEX IF NOT EXISTS idx_squad_leader ON responder_squad (leader_authority_user_id);
+CREATE INDEX IF NOT EXISTS idx_squad_zone ON responder_squad (zone_id);
 
 CREATE TABLE IF NOT EXISTS squad_member (
     id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -168,8 +168,8 @@ CREATE TABLE IF NOT EXISTS squad_member (
     UNIQUE (squad_id, authority_user_id)
 );
 
-CREATE INDEX idx_member_squad ON squad_member (squad_id);
-CREATE INDEX idx_member_user ON squad_member (authority_user_id);
+CREATE INDEX IF NOT EXISTS idx_member_squad ON squad_member (squad_id);
+CREATE INDEX IF NOT EXISTS idx_member_user ON squad_member (authority_user_id);
 
 
 CREATE TABLE IF NOT EXISTS ingestion_batch (
@@ -191,7 +191,7 @@ CREATE TABLE IF NOT EXISTS ingestion_batch_item (
     error_detail text                          -- nullable, why rejected
 );
 
-CREATE INDEX idx_batch_item_batch ON ingestion_batch_item (batch_id);
+CREATE INDEX IF NOT EXISTS idx_batch_item_batch ON ingestion_batch_item (batch_id);
 
 CREATE TABLE IF NOT EXISTS satellite_uplink (
     id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
