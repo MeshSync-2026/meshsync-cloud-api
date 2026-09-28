@@ -68,7 +68,12 @@ export function createServer(edgeSyncClient = null, db = null) {
   let database = db;
   if (!database) {
     if (process.env.DATABASE_URL) {
-      const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+      const dbUrl = process.env.DATABASE_URL;
+      const isLocal = dbUrl.includes("localhost") || dbUrl.includes("127.0.0.1") || dbUrl.includes("@postgres:");
+      const pool = new pg.Pool({
+        connectionString: dbUrl,
+        ssl: isLocal ? false : { rejectUnauthorized: false },
+      });
       database = createDb(true, pool);
     } else {
       database = createDb(false);
@@ -529,6 +534,14 @@ function readBody(req) {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   const port = process.env.PORT || process.env.CC_PORT || 4002;
+  if (process.env.DATABASE_URL) {
+    try {
+      const { runMigration } = await import("../../../migrations/migrate.js");
+      await runMigration();
+    } catch (err) {
+      console.error("[Startup] Database migration notice:", err.message);
+    }
+  }
   const { server } = createServer();
   server.listen(port, () => {
     console.log(`Command Center Service running on http://localhost:${port}`);
