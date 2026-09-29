@@ -53,8 +53,8 @@ export function validateEvent(evt) {
     }
   }
   if (evt.severity_level != null) {
-    if (![SEVERITY.LOW, SEVERITY.MEDIUM, SEVERITY.HIGH].includes(evt.severity_level)) {
-      errors.push("severity_level must be 1, 2, or 3");
+    if (![SEVERITY.LOW, SEVERITY.MEDIUM, SEVERITY.HIGH, SEVERITY.VERY_HIGH].includes(evt.severity_level)) {
+      errors.push("severity_level must be 1, 2, 3, or 4");
     }
   }
   if (evt.status_safety != null) {

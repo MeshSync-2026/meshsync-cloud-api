@@ -164,6 +164,42 @@ export class InMemoryDb {
         return event;
     }
 
+    /**
+     * Emit a cloud origin SOS_RESOLVED or SOS_CANCELLED event.
+     * The Command Center Service calls this when a commander closes an incident.
+     */
+    async emitStatusEvent({ incidentId, eventTypeCode }) {
+        if (!this.incidents.has(incidentId)) return null;
+        const hlc = this.cloudClock.tick();
+        const eventId = `cloud-status-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const event = {
+            id: eventId,
+            parent_id: null,
+            incident_id: incidentId,
+            origin_node_id: CLOUD_NODE_ID,
+            seq: 0,
+            event_type_code: eventTypeCode,
+            actor_role_code: 3,
+            latitude: null,
+            longitude: null,
+            landmark_name: null,
+            report_type_code: null,
+            category_code: null,
+            severity_level: null,
+            status_safety: null,
+            people_count: null,
+            status_water: null,
+            status_injury: null,
+            target_node_id: null,
+            target_zone_id: null,
+            hlc_timestamp: hlc,
+            created_at: Date.now(),
+        };
+        this.meshEvents.set(event.id, { ...event, first_ingested_at: new Date().toISOString() });
+        await this.rebuildProjections();
+        return event;
+    }
+
     // Read methods
 
     async getIncidents(filters = {}) {
@@ -434,6 +470,20 @@ export class PostgresDb {
     }
 
     async emitAssignEvent({ targetNodeId, targetZoneId, incidentId = null, assignedByAdminId = null }) {
+        const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        if (targetZoneId && !UUID_RE.test(targetZoneId)) {
+            const err = new Error(`Unknown zone_id: ${targetZoneId}`);
+            err.statusCode = 400;
+            throw err;
+        }
+        if (targetZoneId) {
+            const zone = await this.pool.query(`SELECT id FROM response_zone WHERE id = $1`, [targetZoneId]);
+            if (zone.rowCount === 0) {
+                const err = new Error(`Unknown zone_id: ${targetZoneId}`);
+                err.statusCode = 400;
+                throw err;
+            }
+        }
         const hlc = this.cloudClock.tick();
         const eventId = `cloud-assign-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         const now = new Date();
@@ -449,9 +499,11 @@ export class PostgresDb {
         await this.rebuildProjections(affectedIncidents);
 
         if (assignedByAdminId) {
+            // mesh_assignment has no source_mesh_event_id column — match the
+            // in-memory behavior: stamp the admin on this responder's assignments
             await this.pool.query(
-                `UPDATE mesh_assignment SET assigned_by_admin_id = $1 WHERE source_mesh_event_id = $2 OR (responder_node_id = $3)`,
-                [assignedByAdminId, eventId, targetNodeId]
+                `UPDATE mesh_assignment SET assigned_by_admin_id = $1 WHERE responder_node_id = $2`,
+                [assignedByAdminId, targetNodeId]
             );
         }
 
@@ -466,6 +518,32 @@ export class PostgresDb {
             target_zone_id: targetZoneId,
             hlc_timestamp: hlc,
             assigned_by_admin_id: assignedByAdminId,
+            created_at: now.getTime(),
+        };
+    }
+
+    async emitStatusEvent({ incidentId, eventTypeCode }) {
+        const inc = await this.pool.query(`SELECT id FROM incident WHERE id = $1`, [incidentId]);
+        if (inc.rows.length === 0) return null;
+        const hlc = this.cloudClock.tick();
+        const eventId = `cloud-status-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const now = new Date();
+        await this.pool.query(
+            `INSERT INTO mesh_event (id, incident_id, origin_node_id, seq, event_type_code,
+        actor_role_code, hlc_timestamp, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+            [eventId, incidentId, CLOUD_NODE_ID, 0, eventTypeCode, 3, hlc, now]
+        );
+        await this.rebuildProjections(new Set([incidentId]));
+
+        return {
+            id: eventId,
+            incident_id: incidentId,
+            origin_node_id: CLOUD_NODE_ID,
+            seq: 0,
+            event_type_code: eventTypeCode,
+            actor_role_code: 3,
+            hlc_timestamp: hlc,
             created_at: now.getTime(),
         };
     }
