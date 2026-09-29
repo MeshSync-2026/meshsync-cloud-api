@@ -359,7 +359,7 @@ export class InMemoryDb {
     return { event, device };
   }
 
-  async dispatchSquad({ squad_id, zone_id, admin_id }) {
+  async dispatchSquad({ squad_id, zone_id, incident_id, admin_id }) {
     const squad = this.getSquadById(squad_id);
     if (!squad) return { error: "Squad not found" };
 
@@ -370,6 +370,7 @@ export class InMemoryDb {
       const result = await this.dispatchResponder({
         authority_user_id: member.authority_user_id,
         zone_id,
+        incident_id,
         admin_id,
       });
       results.push({ member_id: member.id, ...result });
@@ -735,7 +736,7 @@ export class PostgresDb {
     return { event, device };
   }
 
-  async dispatchSquad({ squad_id, zone_id, admin_id }) {
+  async dispatchSquad({ squad_id, zone_id, incident_id, admin_id }) {
     const squad = await this.getSquadById(squad_id);
     if (!squad) return { error: "Squad not found" };
 
@@ -746,6 +747,7 @@ export class PostgresDb {
       const result = await this.dispatchResponder({
         authority_user_id: member.authority_user_id,
         zone_id,
+        incident_id,
         admin_id,
       });
       results.push({ member_id: member.id, ...result });

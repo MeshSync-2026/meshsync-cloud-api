@@ -8,28 +8,33 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// Serializes concurrent migration runs (e.g. two services booting at once on Render)
+const MIGRATION_LOCK_KEY = 727274;
+
+export function isLocalDatabase(databaseUrl) {
+  return databaseUrl.includes("localhost") || databaseUrl.includes("127.0.0.1") || databaseUrl.includes("@postgres:");
+}
+
+function describeError(err) {
+  // AggregateError (e.g. ECONNREFUSED on Windows) carries an empty message
+  if (err?.errors?.length) return err.errors.map((e) => e.message).join("; ");
+  return err?.message || String(err);
+}
+
 async function runMigration() {
   const databaseUrl = process.env.DATABASE_URL || "postgres://postgres:postgres@localhost:5432/meshsync";
   console.log(`[Migrate] Connecting to database: ${databaseUrl.replace(/:[^:@]+@/, ":****@")}`);
 
-  let pg;
-  try {
-    pg = await import("pg");
-  } catch {
-    console.error("[Migrate] 'pg' package is required to run migrations against PostgreSQL.");
-    console.error("[Migrate] Run 'npm install pg' to install.");
-    process.exit(1);
-  }
-
+  const pg = await import("pg");
   const { Pool } = pg.default || pg;
-  const isLocal = databaseUrl.includes("localhost") || databaseUrl.includes("127.0.0.1") || databaseUrl.includes("@postgres:");
   const pool = new Pool({
     connectionString: databaseUrl,
-    ssl: isLocal ? false : { rejectUnauthorized: false },
+    ssl: isLocalDatabase(databaseUrl) ? false : { rejectUnauthorized: false },
   });
 
+  const client = await pool.connect();
   try {
-    const client = await pool.connect();
+    await client.query("SELECT pg_advisory_lock($1)", [MIGRATION_LOCK_KEY]);
     console.log("[Migrate] Connected successfully. Reading initial schema SQL...");
 
     const sqlPath = path.join(__dirname, "001_initial_schema.sql");
@@ -50,21 +55,37 @@ async function runMigration() {
     const tables = tableRes.rows.map((r) => r.table_name);
     console.log(`[Migrate] Verified ${tables.length} tables in public schema:`);
     console.log(`  ${tables.join(", ")}`);
-
-    client.release();
-    await pool.end();
     console.log("[Migrate] Migration completed cleanly.");
-  } catch (err) {
-    console.error("[Migrate] Migration note:", err.message);
-    try { await pool.end(); } catch {}
-    if (import.meta.url === `file://${process.argv[1]}`) {
-      process.exit(1);
-    }
+  } finally {
+    await client.query("SELECT pg_advisory_unlock($1)", [MIGRATION_LOCK_KEY]).catch(() => {});
+    client.release();
+    await pool.end().catch(() => {});
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
-  runMigration();
+/**
+ * Startup hook shared by both services. Runs only when enabled, and fails fast
+ * in production so a broken schema never serves traffic.
+ * @param {boolean} enabledByDefault - Edge Sync owns the log and migrates by default; Command Center does not.
+ */
+async function runStartupMigration(enabledByDefault) {
+  if (!process.env.DATABASE_URL) return;
+  const flag = process.env.RUN_MIGRATIONS;
+  const enabled = flag === undefined ? enabledByDefault : flag === "true";
+  if (!enabled) return;
+  try {
+    await runMigration();
+  } catch (err) {
+    console.error("[Startup] Database migration failed:", describeError(err));
+    if (process.env.NODE_ENV === "production") process.exit(1);
+  }
 }
 
-export { runMigration };
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+  runMigration().catch((err) => {
+    console.error("[Migrate] Migration failed:", describeError(err));
+    process.exit(1);
+  });
+}
+
+export { runMigration, runStartupMigration };

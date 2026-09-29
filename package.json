@@ -14,8 +14,12 @@
     "test:edge": "node --test packages/edge-sync/tests/*.test.js",
     "test:cc": "node --test packages/command-center/tests/*.test.js",
     "test:live": "node scripts/test-live-server.js",
+    "migrate": "node migrations/migrate.js",
+    "create-user": "node scripts/create-user.js",
     "start:edge": "node packages/edge-sync/src/server.js",
-    "start:cc": "node packages/command-center/src/server.js"
+    "start:cc": "node packages/command-center/src/server.js",
+    "dev:edge": "node --env-file=.env packages/edge-sync/src/server.js",
+    "dev:cc": "node --env-file=.env packages/command-center/src/server.js"
   },
   "description": "The MeshSync backend is a Node.js application built using the two-service architecture described in Section 10.5 of the Architecture Plan.",
   "main": "index.js",

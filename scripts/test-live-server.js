@@ -42,6 +42,18 @@ async function runLiveTest() {
       });
       return await res.json();
     },
+    emitEvent: async (payload) => {
+      const res = await fetch(`http://localhost:${EDGE_PORT}/internal/event`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-internal-token": process.env.INTERNAL_API_SECRET || "internal-meshsync-key-secret",
+        },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error(`Edge Sync event error (${res.status}): ${await res.text()}`);
+      return await res.json();
+    },
     getIncidents: async () => {
       const res = await fetch(`http://localhost:${EDGE_PORT}/incidents`);
       const body = await res.json();
@@ -165,11 +177,24 @@ async function runLiveTest() {
     const dispatchResult = await dispatchRes.json();
     log(9, `Dispatched responder to zone '${zone.area_name}' with cloud HLC ${dispatchResult.event.hlc_timestamp}`);
 
+    // 10. Commander resolves the incident via CC -> Edge Sync internal event
+    console.log("\n--- Testing Commander Resolve (event-sourced) ---");
+    const resolveRes = await fetch(`http://localhost:${CC_PORT}/incidents/${incidents[0].id}/resolve`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const resolveResult = await resolveRes.json();
+    log(10, `Resolve emitted cloud event: ${resolveResult.event.id} (type ${resolveResult.event.event_type_code})`);
+
+    const incidentsAfter = await (await fetch(`http://localhost:${EDGE_PORT}/incidents`)).json();
+    const resolved = incidentsAfter.incidents.find((i) => i.id === incidents[0].id);
+    log(11, `Incident now status=${resolved.status_code} (RESOLVED), confidence=${resolved.confidence_code} (RESOLVED)`);
+
     // 9. Data Mule Pulls New Events via GET /sync
     console.log("\n--- Testing Data Mule Pull via GET /sync ---");
     const syncRes = await fetch(`http://localhost:${EDGE_PORT}/sync`);
     const { events } = await syncRes.json();
-    log(10, `Data Mule pulled ${events.length} event(s) from cloud to carry back to mesh:`);
+    log(12, `Data Mule pulled ${events.length} event(s) from cloud to carry back to mesh:`);
     for (const e of events) {
       console.log(`   - Type: ${e.event_type_code}, Origin: ${e.origin_node_id}, HLC: ${e.hlc_timestamp}`);
     }

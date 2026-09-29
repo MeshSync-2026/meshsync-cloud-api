@@ -34,9 +34,9 @@
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import pg from "pg";
+import { createPgPool } from "@meshsync/shared/db";
 import { createDb, InMemoryDb, PostgresDb } from "./db.js";
-import { CLEARANCE } from "@meshsync/shared/enums";
+import { CLEARANCE, EVENT_TYPE } from "@meshsync/shared/enums";
 
 function createHttpEdgeSyncClient(edgeSyncUrl, internalToken) {
   return {
@@ -61,6 +61,21 @@ function createHttpEdgeSyncClient(edgeSyncUrl, internalToken) {
       const data = await res.json();
       return data.incidents || [];
     },
+    async emitEvent(payload) {
+      const res = await fetch(`${edgeSyncUrl}/internal/event`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-internal-token": internalToken || "",
+        },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`Edge Sync event error (${res.status}): ${errText}`);
+      }
+      return await res.json();
+    },
   };
 }
 
@@ -68,13 +83,7 @@ export function createServer(edgeSyncClient = null, db = null) {
   let database = db;
   if (!database) {
     if (process.env.DATABASE_URL) {
-      const dbUrl = process.env.DATABASE_URL;
-      const isLocal = dbUrl.includes("localhost") || dbUrl.includes("127.0.0.1") || dbUrl.includes("@postgres:");
-      const pool = new pg.Pool({
-        connectionString: dbUrl,
-        ssl: isLocal ? false : { rejectUnauthorized: false },
-      });
-      database = createDb(true, pool);
+      database = createDb(true, createPgPool(process.env.DATABASE_URL));
     } else {
       database = createDb(false);
     }
@@ -90,7 +99,7 @@ export function createServer(edgeSyncClient = null, db = null) {
       const method = req.method;
 
       // CORS
-      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Access-Control-Allow-Origin", process.env.CORS_ORIGIN || "*");
       res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
       res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
       if (method === "OPTIONS") {
@@ -467,6 +476,36 @@ export function createServer(edgeSyncClient = null, db = null) {
         return;
       }
 
+      // --- Incident status events (COMMANDER only) ---
+      // Incidents are event-sourced projections, so resolving/cancelling emits a
+      // cloud-origin SOS_RESOLVED / SOS_CANCELLED event via Edge Sync.
+      const incidentEventMatch = path.match(/^\/incidents\/([^/]+)\/(resolve|cancel)$/);
+      if (incidentEventMatch && method === "POST") {
+        if (!requireCommander()) return;
+        if (!client) {
+          res.writeHead(503);
+          res.end(JSON.stringify({ error: "Edge Sync client not configured" }));
+          return;
+        }
+        const eventTypeCode = incidentEventMatch[2] === "resolve" ? EVENT_TYPE.SOS_RESOLVED : EVENT_TYPE.SOS_CANCELLED;
+        try {
+          const event = await client.emitEvent({
+            incident_id: incidentEventMatch[1],
+            event_type_code: eventTypeCode,
+          });
+          res.writeHead(200);
+          res.end(JSON.stringify({ event }));
+        } catch (err) {
+          if (err.message.includes("(404)")) {
+            res.writeHead(404);
+            res.end(JSON.stringify({ error: "Incident not found" }));
+            return;
+          }
+          throw err;
+        }
+        return;
+      }
+
       if (path === "/dispatch/squad" && method === "POST") {
         const body = JSON.parse(await readBody(req));
         if (!body.squad_id || !body.zone_id) {
@@ -477,6 +516,7 @@ export function createServer(edgeSyncClient = null, db = null) {
         const result = await database.dispatchSquad({
           squad_id: body.squad_id,
           zone_id: body.zone_id,
+          incident_id: body.incident_id,
           admin_id: currentUser?.id,
         });
         if (result.error) {
@@ -534,14 +574,8 @@ function readBody(req) {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   const port = process.env.PORT || process.env.CC_PORT || 4002;
-  if (process.env.DATABASE_URL) {
-    try {
-      const { runMigration } = await import("../../../migrations/migrate.js");
-      await runMigration();
-    } catch (err) {
-      console.error("[Startup] Database migration notice:", err.message);
-    }
-  }
+  const { runStartupMigration } = await import("../../../migrations/migrate.js");
+  await runStartupMigration(false);
   const { server } = createServer();
   server.listen(port, () => {
     console.log(`Command Center Service running on http://localhost:${port}`);

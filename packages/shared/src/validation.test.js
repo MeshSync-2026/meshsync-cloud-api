@@ -57,6 +57,17 @@ describe("Validation — validateEvent", () => {
     assert.equal(evt.landmark_name.length, 30);
   });
 
+  test("severity_level 4 (VERY_HIGH) is accepted", () => {
+    const result = validateEvent({ ...validEvent, severity_level: SEVERITY.VERY_HIGH });
+    assert.equal(result.valid, true);
+  });
+
+  test("severity_level outside 1-4 fails", () => {
+    const result = validateEvent({ ...validEvent, severity_level: 5 });
+    assert.equal(result.valid, false);
+    assert.ok(result.errors.some((e) => e.includes("severity_level")));
+  });
+
   test("invalid latitude fails", () => {
     const result = validateEvent({ ...validEvent, latitude: 999 });
     assert.equal(result.valid, false);

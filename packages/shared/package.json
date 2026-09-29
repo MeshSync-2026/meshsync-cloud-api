@@ -10,9 +10,13 @@
     "./fold": "./src/fold.js",
     "./priority": "./src/priority.js",
     "./validation": "./src/validation.js",
-    "./auth": "./src/auth.js"
+    "./auth": "./src/auth.js",
+    "./db": "./src/db.js"
   },
   "scripts": {
     "test": "node --test src/*.test.js"
+  },
+  "dependencies": {
+    "pg": "^8.13.3"
   }
 }

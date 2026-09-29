@@ -22,7 +22,8 @@ import crypto from "node:crypto";
 import zlib from "node:zlib";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import pg from "pg";
+import { createPgPool } from "@meshsync/shared/db";
+import { EVENT_TYPE } from "@meshsync/shared/enums";
 import { createDb } from "./db.js";
 
 const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10MB limit
@@ -40,13 +41,7 @@ export function createServer(db = null) {
     let database = db;
     if (!database) {
         if (process.env.DATABASE_URL) {
-            const dbUrl = process.env.DATABASE_URL;
-            const isLocal = dbUrl.includes("localhost") || dbUrl.includes("127.0.0.1") || dbUrl.includes("@postgres:");
-            const pool = new pg.Pool({
-                connectionString: dbUrl,
-                ssl: isLocal ? false : { rejectUnauthorized: false },
-            });
-            database = createDb(true, pool);
+            database = createDb(true, createPgPool(process.env.DATABASE_URL));
         } else {
             database = createDb(false);
         }
@@ -443,6 +438,61 @@ export function createServer(db = null) {
                     incidentId: parsed.incident_id,
                     assignedByAdminId: parsed.assigned_by_admin_id,
                 });
+                // Push to live WS clients so connected phones get the ASSIGN now,
+                // not only on their next /sync pull.
+                broadcastToWsClients({ type: "events", events: [event] }, null);
+                res.writeHead(201);
+                res.end(JSON.stringify(event));
+                return;
+            }
+
+            // --- POST /internal/event — cloud-origin SOS_RESOLVED / SOS_CANCELLED ---
+            if (path === "/internal/event" && method === "POST") {
+                const internalToken = req.headers["x-internal-token"];
+                let expectedSecret;
+                try {
+                    expectedSecret = getInternalApiSecret();
+                } catch (err) {
+                    res.writeHead(500);
+                    res.end(JSON.stringify({ error: err.message }));
+                    return;
+                }
+                if (!internalToken || internalToken !== expectedSecret) {
+                    res.writeHead(403);
+                    res.end(JSON.stringify({ error: "Forbidden: invalid internal token" }));
+                    return;
+                }
+
+                const body = await readBody(req);
+                let parsed;
+                try {
+                    parsed = JSON.parse(body);
+                } catch {
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: "Invalid JSON" }));
+                    return;
+                }
+                if (!parsed.incident_id) {
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: "incident_id is required" }));
+                    return;
+                }
+                const typeCode = parsed.event_type_code;
+                if (![EVENT_TYPE.SOS_RESOLVED, EVENT_TYPE.SOS_CANCELLED].includes(typeCode)) {
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: "event_type_code must be 5 (SOS_RESOLVED) or 6 (SOS_CANCELLED)" }));
+                    return;
+                }
+                const event = await database.emitStatusEvent({
+                    incidentId: parsed.incident_id,
+                    eventTypeCode: typeCode,
+                });
+                if (!event) {
+                    res.writeHead(404);
+                    res.end(JSON.stringify({ error: "Incident not found" }));
+                    return;
+                }
+                broadcastToWsClients({ type: "events", events: [event] }, null);
                 res.writeHead(201);
                 res.end(JSON.stringify(event));
                 return;
@@ -599,14 +649,8 @@ function parseWsFrame(buffer) {
 // Start server if run directly
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
     const port = process.env.PORT || process.env.EDGE_SYNC_PORT || 4001;
-    if (process.env.DATABASE_URL) {
-        try {
-            const { runMigration } = await import("../../../migrations/migrate.js");
-            await runMigration();
-        } catch (err) {
-            console.error("[Startup] Database migration notice:", err.message);
-        }
-    }
+    const { runStartupMigration } = await import("../../../migrations/migrate.js");
+    await runStartupMigration(true);
     const { server } = createServer();
     server.listen(port, () => {
         console.log(`Edge Sync Service running on http://localhost:${port}`);
