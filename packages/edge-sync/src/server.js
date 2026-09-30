@@ -169,17 +169,22 @@ export function createServer(db = null) {
                             // Phone is pushing events via WebSocket
                             const result = await database.ingestEvents(msg.events, client.nodeId || "ws-client");
 
-                            // Broadcast ALL pushed events to other connected phones.
-                            // Receiving phones dedup via hasProcessedBroadcast (§7.1).
-                            // This is correct epidemic routing — send everything, dedup on receive.
-                            if (msg.events.length > 0) {
+                            // Broadcast only canonical events (inserted or already
+                            // known). Rejected rows must never reach other phones.
+                            const okIds = new Set(
+                                (result.items || [])
+                                    .filter((it) => it.outcome === "inserted" || it.outcome === "duplicate_ignored")
+                                    .map((it) => it.row_id)
+                            );
+                            const acceptedEvents = msg.events.filter((e) => e && okIds.has(e.id));
+                            if (acceptedEvents.length > 0) {
                                 broadcastToWsClients(
-                                    { type: "events", events: msg.events },
+                                    { type: "events", events: acceptedEvents },
                                     client.nodeId
                                 );
                             }
 
-                            console.log(`[WS] Node ${client.nodeId}: ingested ${result.newCount} new, ${result.duplicateCount} dup, broadcasting ${msg.events.length} to ${wsClients.size - 1} peers`);
+                            console.log(`[WS] Node ${client.nodeId}: ingested ${result.newCount} new, ${result.duplicateCount} dup, broadcasting ${acceptedEvents.length} to ${wsClients.size - 1} peers`);
 
                             // Acknowledge
                             client.write(
@@ -255,11 +260,17 @@ export function createServer(db = null) {
                 const uploadingNodeId = parsed.uploading_node_id || "unknown";
                 const result = await database.ingestEvents(events, uploadingNodeId);
 
-                // Broadcast all ingested events to connected WebSocket clients.
-                // Receiving phones dedup via hasProcessedBroadcast (§7.1).
-                if (events.length > 0 && result.newCount > 0) {
+                // Broadcast only canonical events (inserted or already known) —
+                // rejected rows must never reach connected phones.
+                const okIds = new Set(
+                    (result.items || [])
+                        .filter((it) => it.outcome === "inserted" || it.outcome === "duplicate_ignored")
+                        .map((it) => it.row_id)
+                );
+                const acceptedEvents = events.filter((e) => e && okIds.has(e.id));
+                if (acceptedEvents.length > 0) {
                     broadcastToWsClients(
-                        { type: "events", events },
+                        { type: "events", events: acceptedEvents },
                         null // don't exclude — HTTP ingest has no WS node identity
                     );
                 }

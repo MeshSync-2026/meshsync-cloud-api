@@ -19,6 +19,11 @@ const MAX_PEOPLE_COUNT = 100000;
 export function validateEvent(evt) {
   const errors = [];
 
+  // Shape guard — a null/non-object row must reject, not throw
+  if (!evt || typeof evt !== "object" || Array.isArray(evt)) {
+    return { valid: false, errors: ["event must be an object"] };
+  }
+
   // Required fields
   if (!evt.id || typeof evt.id !== "string") {
     errors.push("id is required and must be a string (UUIDv4)");
@@ -31,14 +36,14 @@ export function validateEvent(evt) {
   }
   if (!evt.hlc_timestamp || typeof evt.hlc_timestamp !== "string") {
     errors.push("hlc_timestamp is required and must be a string");
-  } else if (evt.hlc_timestamp.length !== 28) {
-    errors.push(`hlc_timestamp must be 28 chars (got ${evt.hlc_timestamp.length})`);
+  } else if (!/^\d{13}\|\d{5}\|[0-9a-f]{8}$/.test(evt.hlc_timestamp)) {
+    errors.push(`hlc_timestamp must match "<13-digit-ms>|<5-digit-counter>|<8-hex-node>"`);
   }
   if (typeof evt.event_type_code !== "number" || evt.event_type_code < 1 || evt.event_type_code > 8) {
     errors.push("event_type_code must be a number 1-8");
   }
-  if (typeof evt.seq !== "number" || evt.seq < 0) {
-    errors.push("seq must be a non-negative number");
+  if (!Number.isInteger(evt.seq) || evt.seq < 0) {
+    errors.push("seq must be a non-negative integer");
   }
 
   // Optional but validated if present
@@ -113,7 +118,7 @@ export function validateEvent(evt) {
   }
 
   // created_at - device-origin, must be a valid timestamp
-  if (evt.created_at == null) {
+  if (evt.created_at == null || !Number.isFinite(evt.created_at) || evt.created_at <= 0) {
     errors.push("created_at is required (device-origin epoch ms)");
   }
 

@@ -14,6 +14,8 @@ import {
   STATUS,
   CONFIDENCE,
   ACTION_TYPE,
+  REPORT_TYPE,
+  SEVERITY,
   HEARTBEAT_INTERVAL_MS,
   CONFIDENCE_THRESHOLD_MS,
 } from "./enums.js";
@@ -175,8 +177,42 @@ export function lwwFold(sortedEvents) {
       }
 
       case EVENT_TYPE.STATUS_UPDATE: {
-        // Update incident fields via LWW
-        const inc = incidents.get(incId);
+        // Update incident fields via LWW; standalone hazard/distress statuses
+        // create incidents so they reach projections (parity with mobile fold).
+        const reportTypeCode = evt.report_type_code ?? evt.reportTypeCode;
+        const statusSafety = evt.status_safety ?? evt.statusSafety;
+        const statusWater = evt.status_water ?? evt.statusWater;
+        const statusInjury = evt.status_injury ?? evt.statusInjury;
+        let inc = incidents.get(incId);
+        if (!inc) {
+          const isDistress = (statusSafety ?? 0) >= 1 || (statusInjury ?? 0) >= 1 || (statusWater ?? 0) >= 2;
+          if (reportTypeCode === REPORT_TYPE.HAZARD || reportTypeCode == null || isDistress) {
+            const severityLevel = evt.severity_level ?? evt.severityLevel ?? evt.severity ?? SEVERITY.MEDIUM;
+            inc = {
+              id: incId,
+              creator_node_id: evt.origin_node_id,
+              latitude: evt.latitude,
+              longitude: evt.longitude,
+              landmark_name: evt.landmark_name ?? evt.landmarkName ?? null,
+              report_type_code: reportTypeCode ?? REPORT_TYPE.HAZARD,
+              category_code: evt.category_code ?? evt.categoryCode ?? null,
+              severity_level: severityLevel,
+              severity: severityLevel,
+              status_safety: statusSafety,
+              people_count: evt.people_count ?? evt.peopleCount,
+              status_water: statusWater,
+              status_injury: statusInjury,
+              status_code: STATUS.OPEN,
+              confidence_code: CONFIDENCE.LIVE,
+              last_heartbeat_at: evt.created_at,
+              last_alive_hlc: evt.hlc_timestamp,
+              last_event_hlc: evt.hlc_timestamp,
+              created_at: evt.created_at,
+              updated_at: evt.created_at,
+            };
+            incidents.set(incId, inc);
+          }
+        }
         if (inc) {
           if (evt.severity_level != null) inc.severity_level = evt.severity_level;
           if (evt.status_safety != null) inc.status_safety = evt.status_safety;

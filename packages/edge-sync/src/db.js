@@ -501,13 +501,16 @@ export class PostgresDb {
         const eventId = `cloud-assign-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         const now = new Date();
         const incId = incidentId || `assign-${Date.now()}`;
-        await this.pool.query(
+        const ins = await this.pool.query(
             `INSERT INTO mesh_event (id, incident_id, origin_node_id, seq, event_type_code,
         actor_role_code, target_node_id, target_zone_id, hlc_timestamp, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-            [eventId, incId, CLOUD_NODE_ID, 0, EVENT_TYPE.ASSIGN,
+       VALUES ($1,$2,$3,
+         (SELECT COALESCE(MAX(seq),0)+1 FROM mesh_event WHERE origin_node_id=$3),
+         $4,$5,$6,$7,$8,$9) RETURNING seq`,
+            [eventId, incId, CLOUD_NODE_ID, EVENT_TYPE.ASSIGN,
                 3, targetNodeId, targetZoneId, hlc, now]
         );
+        const cloudSeq = ins.rows[0]?.seq ?? 0;
         const affectedIncidents = incidentId ? new Set([incidentId]) : null;
         await this.rebuildProjections(affectedIncidents);
 
@@ -524,7 +527,7 @@ export class PostgresDb {
             id: eventId,
             incident_id: incId,
             origin_node_id: CLOUD_NODE_ID,
-            seq: 0,
+            seq: cloudSeq,
             event_type_code: EVENT_TYPE.ASSIGN,
             actor_role_code: 3,
             target_node_id: targetNodeId,
@@ -541,19 +544,22 @@ export class PostgresDb {
         const hlc = this.cloudClock.tick();
         const eventId = `cloud-status-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         const now = new Date();
-        await this.pool.query(
+        const ins = await this.pool.query(
             `INSERT INTO mesh_event (id, incident_id, origin_node_id, seq, event_type_code,
         actor_role_code, hlc_timestamp, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-            [eventId, incidentId, CLOUD_NODE_ID, 0, eventTypeCode, 3, hlc, now]
+       VALUES ($1,$2,$3,
+         (SELECT COALESCE(MAX(seq),0)+1 FROM mesh_event WHERE origin_node_id=$3),
+         $4,$5,$6,$7) RETURNING seq`,
+            [eventId, incidentId, CLOUD_NODE_ID, eventTypeCode, 3, hlc, now]
         );
+        const cloudSeq = ins.rows[0]?.seq ?? 0;
         await this.rebuildProjections(new Set([incidentId]));
 
         return {
             id: eventId,
             incident_id: incidentId,
             origin_node_id: CLOUD_NODE_ID,
-            seq: 0,
+            seq: cloudSeq,
             event_type_code: eventTypeCode,
             actor_role_code: 3,
             hlc_timestamp: hlc,
