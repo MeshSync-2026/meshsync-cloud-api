@@ -392,7 +392,8 @@ export class PostgresDb {
             if (deletedIds.length > 0) {
                 await this.pool.query(`DELETE FROM incident_responder WHERE incident_id = ANY($1::text[])`, [deletedIds]);
                 await this.pool.query(`DELETE FROM incident_history WHERE incident_id = ANY($1::text[])`, [deletedIds]);
-                await this.pool.query(`DELETE FROM mesh_assignment WHERE incident_id = ANY($1::text[])`, [deletedIds]);
+                // mesh_assignment is responder→zone scoped and has no incident_id
+                // column — a delete here crashes ("column does not exist").
                 await this.pool.query(`DELETE FROM incident WHERE id = ANY($1::text[])`, [deletedIds]);
             }
         }
