@@ -352,8 +352,12 @@ export class PostgresDb {
             // Extract affected incident IDs for incremental projection rebuild
             const affectedIncidentIds = new Set(valid.map((e) => e.incident_id).filter(Boolean));
 
-            // Rebuild projections for affected incidents
-            await this.rebuildProjections(affectedIncidentIds);
+            // Rebuild projections for affected incidents only. An empty set
+            // means this batch inserted nothing new — skip entirely instead of
+            // falling back to a full-log fold (which must stay crash-safe).
+            if (affectedIncidentIds.size > 0) {
+                await this.rebuildProjections(affectedIncidentIds);
+            }
 
             return {
                 batch: { id: batchId, new_count: newCount, duplicate_count: duplicateCount, rejected_count: totalRejected },
@@ -455,7 +459,15 @@ export class PostgresDb {
         }
 
         // Upsert mesh assignments
+        const ASSIGN_ZONE_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
         for (const a of folded.assignments) {
+            // mesh_assignment.zone_id is uuid NOT NULL — legacy rows may carry
+            // non-uuid zone strings (pre-validation cloud events). Skip them
+            // instead of letting one bad row crash the whole rebuild.
+            if (!ASSIGN_ZONE_UUID_RE.test(a.zone_id || "")) {
+                console.warn(`[db] skipping assignment with non-uuid zone_id: ${a.zone_id}`);
+                continue;
+            }
             const aId = `${a.responder_node_id}|${a.zone_id}`;
             await this.pool.query(
                 `INSERT INTO mesh_assignment (id, responder_node_id, zone_id, hlc_timestamp, assigned_at)
