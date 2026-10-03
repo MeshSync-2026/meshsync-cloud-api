@@ -27,12 +27,12 @@ function benchCluster(n) {
   return ms;
 }
 
-function makeEvent(i, node = "bench-node") {
+function makeEvent(i, node = "node-bench01") {
   // Minimal valid STATUS_UPDATE per packages/shared/src/validation.js
   const seq = i + 1;
   return {
     id: `bench-${node}-${i}`,
-    hlc_timestamp: `1790750000000-${String(seq).padStart(5, "0")}-${node.slice(0, 8)}`,
+    hlc_timestamp: `1790750000000|${String(seq).padStart(5, "0")}|beef0001`,
     origin_node_id: node,
     event_type_code: 3,
     schema_version: 1,

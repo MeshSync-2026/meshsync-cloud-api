@@ -1,0 +1,397 @@
+{
+  "info": {
+    "name": "MeshSync API - Evaluation Pack",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "EDGE",
+      "value": "https://meshsync-edge-sync.onrender.com"
+    },
+    {
+      "key": "CC",
+      "value": "https://meshsync-cloud-api.onrender.com"
+    },
+    {
+      "key": "TOKEN",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "Auth + security probes",
+      "item": [
+        {
+          "name": "POST /auth/login (valid)",
+          "request": {
+            "method": "POST",
+            "url": "{{CC}}/auth/login",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"username\":\"anjali@meshsync.lk\",\"password\":\"demo1234\"}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"200 + token\",()=>{pm.response.to.have.status(200);pm.collectionVariables.set(\"TOKEN\",pm.response.json().token)})"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /auth/login (wrong password)",
+          "request": {
+            "method": "POST",
+            "url": "{{CC}}/auth/login",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"username\":\"anjali@meshsync.lk\",\"password\":\"WRONG\"}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"401 invalid credentials\",()=>pm.response.to.have.status(401))"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /users (no token)",
+          "request": {
+            "method": "GET",
+            "url": "{{CC}}/users"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"401 unauthenticated\",()=>pm.response.to.have.status(401))"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /users (forged token)",
+          "request": {
+            "method": "GET",
+            "url": "{{CC}}/users",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer forged.token.here"
+              }
+            ]
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"401 bad signature\",()=>pm.response.to.have.status(401))"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /internal/assign (no internal token)",
+          "request": {
+            "method": "POST",
+            "url": "{{EDGE}}/internal/assign",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"403 internal route protected\",()=>pm.expect(pm.response.code).to.be.oneOf([401,403]))"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Command Center - authenticated reads",
+      "item": [
+        {
+          "name": "GET /auth/me",
+          "request": {
+            "method": "GET",
+            "url": "{{CC}}/auth/me",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}"
+              }
+            ]
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"session valid\",()=>pm.response.to.have.status(200))"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /zones",
+          "request": {
+            "method": "GET",
+            "url": "{{CC}}/zones",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}"
+              }
+            ]
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"zones list\",()=>pm.response.to.have.status(200))"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /squads",
+          "request": {
+            "method": "GET",
+            "url": "{{CC}}/squads",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}"
+              }
+            ]
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"squads list\",()=>pm.response.to.have.status(200))"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /devices",
+          "request": {
+            "method": "GET",
+            "url": "{{CC}}/devices",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}"
+              }
+            ]
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"devices list\",()=>pm.response.to.have.status(200))"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /clusters",
+          "request": {
+            "method": "GET",
+            "url": "{{CC}}/clusters",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}"
+              }
+            ]
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"clusters list\",()=>pm.response.to.have.status(200))"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /users (commander)",
+          "request": {
+            "method": "GET",
+            "url": "{{CC}}/users",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}"
+              }
+            ]
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"users list\",()=>pm.response.to.have.status(200))"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /satellite",
+          "request": {
+            "method": "GET",
+            "url": "{{CC}}/satellite",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{TOKEN}}"
+              }
+            ]
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"uplinks list\",()=>pm.response.to.have.status(200))"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Edge Sync - event pipeline",
+      "item": [
+        {
+          "name": "GET /health",
+          "request": {
+            "method": "GET",
+            "url": "{{EDGE}}/health"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"healthy\",()=>pm.response.to.have.status(200))"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /incidents",
+          "request": {
+            "method": "GET",
+            "url": "{{EDGE}}/incidents"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"incident projections\",()=>pm.response.to.have.status(200))"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /ingest (malformed event)",
+          "request": {
+            "method": "POST",
+            "url": "{{EDGE}}/ingest",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"uploading_node_id\":\"postman-eval\",\"events\":[{\"id\":\"bad-1\",\"hlc_timestamp\":\"NOT-AN-HLC\",\"origin_node_id\":\"postman-eval\",\"event_type_code\":99,\"seq\":\"nan\",\"incident_id\":\"i1\",\"created_at\":-1}]}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"rejected not crashed\",()=>{pm.response.to.have.status(200);pm.expect(pm.response.json().rejected_count).to.be.above(0)})"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /sync (SQL injection probe)",
+          "request": {
+            "method": "GET",
+            "url": "{{EDGE}}/sync?node_id=' OR 1=1;DROP TABLE mesh_event;--"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"injection rejected\",()=>pm.expect(pm.response.code).to.be.oneOf([400,403]))"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
